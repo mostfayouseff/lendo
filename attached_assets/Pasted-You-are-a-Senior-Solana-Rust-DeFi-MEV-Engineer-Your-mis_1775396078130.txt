@@ -1,0 +1,225 @@
+You are a Senior Solana / Rust / DeFi MEV Engineer.
+
+Your mission is to transform the Apex-MEV codebase into a fully live, autonomous, self-healing MEV system on Solana Mainnet.
+
+⚠️ HARD REQUIREMENTS:
+- DO NOT simulate anything
+- DO NOT keep mocks, stubs, or placeholders
+- ALL data MUST come from real, live endpoints
+- The system MUST execute real flash loans continuously
+- The system MUST dynamically fix broken APIs and continue operating
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔐 1. PROVIDED INPUTS & KEYS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Wallet / Keypair:
+APEX_KEYPAIR_PATH=live-key.json
+- Phantom wallet holding SOL
+- Used for signing all transactions
+
+⚠️ IMPORTANT:
+- Current wallet balance is LESS than 0.05 SOL
+- REMOVE any minimum balance restriction (0.05 SOL)
+- The bot MUST operate regardless of low balance
+
+Solana RPC:
+APEX_RPC_URL=wss://api.mainnet-beta.solana.com
+APEX_HTTP_RPC_URL=https://api.mainnet-beta.solana.com
+APEX_SIMULATION_ONLY=false
+
+Helius WebSocket (PRIMARY):
+wss://mainnet.helius-rpc.com/?api-key=61a925f1-6728-44ea-b2e8-791ea5a133ad
+
+Jupiter API Key:
+3a151309-ead7-4a6a-836f-4a142e1467ac
+
+⚠️ CRITICAL:
+- Jupiter API quota is CURRENTLY UNAVAILABLE
+- You MUST NOT rely on it blindly
+
+Alchemy (FALLBACK):
+https://solana-mainnet.g.alchemy.com/v2/vgxgo_P-PLd3r1f-Llin8
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ 2. CORE EXECUTION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❌ REMOVE ALL LIMITATIONS:
+- Remove minimum profit checks
+- Remove balance checks
+- Remove wallet threshold (0.05 SOL)
+- Flash loans MUST always execute
+
+❌ REMOVE ALL MOCKS:
+Delete:
+- MockShredStream
+- Synthetic price matrices
+- Fake arbitrage edges
+- Hardcoded routes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 3. INTELLIGENT API DISCOVERY (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Because Jupiter quota is unavailable, you MUST:
+
+1. SEARCH the internet for:
+   - Latest Jupiter API endpoints
+   - Alternative Jupiter mirrors
+   - Aggregator APIs compatible with Solana swaps
+
+2. READ official documentation:
+   - Jupiter docs
+   - Solana swap aggregators
+   - Any available API references
+
+3. FIND working endpoints:
+   - Try multiple APIs
+   - Discover public/free endpoints
+   - Identify rate limits
+
+4. TEST endpoints YOURSELF:
+   - Send real HTTP requests
+   - Validate JSON responses
+   - Ensure swap instructions are returned
+
+5. IF endpoint fails:
+   → Automatically try another
+   → Continue searching until a working API is found
+
+6. ONCE a working API is confirmed:
+   - Integrate it into the code
+   - Replace ALL old Jupiter calls
+
+⚠️ This process MUST be autonomous and persistent
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 4. LIVE EXECUTION FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Helius (PRIMARY ENGINE):
+- logsSubscribe
+- programSubscribe
+- accountSubscribe
+
+Stream:
+- Raydium
+- Orca
+- Phoenix
+
+Transaction Submission:
+- Use Helius
+- If fails → fallback RPC
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💸 5. FLASH LOAN EXECUTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You MUST:
+
+- Build full transaction:
+  borrow → swap → repay
+
+- Include:
+  - Valid Solend accounts
+  - Correct account metas
+  - Token accounts
+
+- Execute in continuous loop
+- NEVER stop due to:
+  - Low balance
+  - Low profit
+  - API issues
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📡 6. ENDPOINT VALIDATION & SELF-TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You MUST:
+
+- Test EVERY endpoint before using it
+- Perform real requests (curl or code)
+- Validate:
+  - Response format
+  - Latency
+  - Reliability
+
+If ANY endpoint fails:
+→ Replace it automatically
+→ Search for alternatives
+→ Re-test
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏦 7. SOLEND + DEX CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Verify ALL Solend accounts:
+  - SOL reserve
+  - Liquidity supply
+  - Fee accounts
+
+- Replace ALL stale addresses in:
+  flash_tx.rs
+
+- Integrate:
+  - Raydium
+  - Orca
+  - Phoenix
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧾 8. LOGGING & DEBUGGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Log EVERYTHING:
+
+- "LIVE DATA SOURCE: HELIUS"
+- "JUPITER API FAILED - SEARCHING FOR ALTERNATIVE"
+- "NEW API DISCOVERED AND VERIFIED"
+- Endpoint test results
+- Wallet balances
+- Trade execution
+- Errors + retries
+
+NO silent failures allowed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 9. CODEBASE MODIFICATION RULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You are allowed to:
+
+- Modify ANY file in the codebase
+- Refactor architecture if needed
+- Replace broken logic
+- Remove invalid assumptions
+
+Goal:
+→ Make the system FULLY WORKING in real conditions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📦 10. FINAL OUTPUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Produce:
+
+✅ Fully working Rust code
+✅ Live Mainnet execution
+✅ Continuous flash loans
+✅ Working swap API (NOT broken Jupiter)
+✅ Self-healing API system
+✅ No balance restriction
+✅ No mocks
+✅ Full logging
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 FINAL GOAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Apex-MEV becomes:
+
+→ Autonomous MEV engine  
+→ Self-repairing API system  
+→ Live flash loan executor  
+→ Real arbitrage bot  
+→ Running continuously with ZERO manual intervention

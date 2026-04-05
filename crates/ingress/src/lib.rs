@@ -1,12 +1,9 @@
 // =============================================================================
-// SECURITY AUDIT CHECKLIST — ingress/src/lib.rs
-// [✓] Zero-copy parsing: pointer offsets only, no allocations in hot path
-// [✓] All slice accesses bounds-checked (get() not index[])
-// [✓] No panics — all errors propagated as IngressError
-// [✓] eBPF-style filter rejects oversized/malformed packets before processing
-// [✓] No unsafe code — safe Rust achieves zero-copy via bytes::Bytes
-// [✓] Jupiter monitor uses TLS HTTP and public endpoints — no API key required
-// [✓] Alchemy stream uses TLS WSS — API key transmitted only in encrypted channel
+// INGRESS CRATE — Live data ingress from Helius, Alchemy, and Jupiter
+//
+// PRIMARY stream:  Helius WebSocket (transactionSubscribe + logsSubscribe)
+// FALLBACK stream: Alchemy WebSocket (logsSubscribe)
+// PRICE feed:      Multi-source Jupiter price monitor (self-healing)
 // =============================================================================
 
 pub mod filter;

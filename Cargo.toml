@@ -1,0 +1,84 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/ingress",
+    "crates/core",
+    "crates/strategy",
+    "crates/solana-program",
+    "crates/jito-handler",
+    "crates/risk-oracle",
+    "crates/safety",
+    "crates/bot",
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Fast hashing (ahash-backed, ~3× faster than std HashMap for hot paths)
+rustc-hash = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Numeric / math
+rust_decimal = { version = "1", features = ["serde-float"] }
+num-traits = "0.2"
+
+# Crypto / hashing
+sha2 = "0.10"
+blake3 = "1"
+
+# Random (property-based tests)
+rand = { version = "0.8", features = ["small_rng"] }
+
+# Environment / config
+dotenvy = "0.15"
+
+# Byte utilities
+bytes = "1"
+bytemuck = { version = "1", features = ["derive"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+prometheus = { version = "0.13", features = ["process"] }
+
+# HTTP client (Jupiter API, Jito block engine, Solana RPC)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# WebSocket client (Helius Enhanced WebSockets)
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+
+# Async stream utilities (required by tokio-tungstenite StreamExt/SinkExt)
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# Encoding
+bs58 = "0.5"
+base64 = "0.22"
+
+# Ed25519 signing (Solana transaction signing)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

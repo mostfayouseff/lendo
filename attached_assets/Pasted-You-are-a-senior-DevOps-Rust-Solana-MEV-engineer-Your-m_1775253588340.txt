@@ -1,0 +1,198 @@
+You are a senior DevOps + Rust + Solana MEV engineer.
+
+Your mission is to FULLY SET UP, FIX, UPGRADE, and OPTIMIZE the Apex-MEV project into a production-grade, ultra-low-latency arbitrage system.
+
+You must act AUTONOMOUSLY and COMPLETE ALL steps without stopping.
+
+⚠️ HARD REQUIREMENTS:
+- Do EVERYTHING end-to-end (environment → code → testing → optimization)
+- Do NOT leave partial work
+- After finishing, REVIEW and IMPROVE again
+- Keep iterating until the system is clean, fast, and production-ready
+- Always explain what you did
+
+────────────────────────────
+PHASE 1 — FULL ENVIRONMENT SETUP
+────────────────────────────
+- Install and configure:
+  - Rust (latest stable via rustup)
+  - Cargo
+  - Solana CLI
+  - Required system dependencies
+
+- Fix any build issues automatically
+- Ensure project compiles with:
+  cargo build --release
+
+- Clean:
+  - target/
+  - unused dependencies
+  - broken configs
+
+────────────────────────────
+PHASE 2 — PROJECT AUDIT & AUTO-FIX
+────────────────────────────
+- Scan ALL crates:
+  apex-core
+  apex-engine
+  apex-indexer
+  apex-executor
+  apex-risk
+  apex-bin
+
+- Detect and fix:
+  - compile errors
+  - logical bugs
+  - inefficient patterns
+  - unused code
+  - blocking calls
+
+────────────────────────────
+PHASE 3 — PERFORMANCE & LATENCY OPTIMIZATION
+────────────────────────────
+- Convert critical paths to async
+- Optimize Tokio runtime
+- Reduce RPC calls
+- Add:
+  - in-memory caching
+  - fast price feeds
+  - precomputed routes
+
+- Remove any latency bottlenecks
+
+────────────────────────────
+PHASE 4 — HELIUS INTEGRATION + SIMULATION
+────────────────────────────
+- Integrate Helius:
+  WebSocket + HTTP RPC
+
+- Add simulation engine:
+  - simulate every trade before execution
+  - calculate:
+    profit
+    fees
+    slippage
+    compute units
+
+- Reject bad trades automatically
+
+- Add .env:
+  SIMULATION_MODE=true
+
+────────────────────────────
+PHASE 5 — FLASH LOANS (REAL IMPLEMENTATION)
+────────────────────────────
+- Integrate:
+  - Solend flash loans
+
+- Implement full atomic flow:
+  borrow → trade → repay
+
+- Add safety checks:
+  - max loan size
+  - liquidity validation
+
+────────────────────────────
+PHASE 6 — ADVANCED ARBITRAGE ENGINE
+────────────────────────────
+- Support:
+  - Raydium
+  - Orca
+  - Jupiter
+
+- Add:
+  - multi-hop arbitrage (max 4 hops)
+  - triangular arbitrage
+
+- Build scoring system:
+  score = net profit - risk - slippage - fees
+
+- Execute ONLY best opportunities
+
+────────────────────────────
+PHASE 7 — RISK MANAGEMENT
+────────────────────────────
+- Add:
+  - max loss limit
+  - max position size
+  - fail-safe circuit breaker
+
+────────────────────────────
+PHASE 8 — EXECUTION ENGINE
+────────────────────────────
+- Optimize transactions:
+  - Versioned transactions
+  - Address Lookup Tables
+
+- Add:
+  - priority fees
+  - compute budget tuning
+
+────────────────────────────
+PHASE 9 — CONFIGURATION SYSTEM
+────────────────────────────
+Create FULL .env system:
+
+APEX_RPC_URL=
+APEX_HTTP_RPC_URL=
+HELIUS_API_KEY=
+
+SIMULATION_MODE=true
+LIVE_TRADING=false
+
+MIN_PROFIT_USD=
+MAX_POSITION_USD=
+MAX_HOPS=
+
+FLASH_LOAN_ENABLED=true
+
+────────────────────────────
+PHASE 10 — LOGGING & METRICS
+────────────────────────────
+- Add structured logs:
+  - opportunities
+  - simulations
+  - executed trades
+
+- Display:
+  real-time profit (PnL)
+
+────────────────────────────
+PHASE 11 — FINAL REVIEW & AUTO-IMPROVEMENT
+────────────────────────────
+After completing ALL steps:
+
+- Re-scan the entire project AGAIN
+- Improve:
+  - performance
+  - structure
+  - safety
+
+- Refactor messy code
+
+- Ensure:
+  - zero crashes
+  - clean logs
+  - fast execution
+
+────────────────────────────
+PHASE 12 — USER INSTRUCTIONS
+────────────────────────────
+Explain clearly:
+
+1. Where to put the wallet (keypair file)
+2. How to configure .env
+3. How to run simulation mode
+4. How to safely enable live trading
+
+⚠️ IMPORTANT:
+- DO NOT enable live trading automatically
+- Ask the user first:
+  "Are you ready to go live?"
+
+────────────────────────────
+
+FINAL GOAL:
+A fully working, optimized, simulation-first, production-grade Solana MEV arbitrage bot with real flash loans and ultra-fast execution.
+
+Start immediately and do NOT stop until everything is complete and optimized.

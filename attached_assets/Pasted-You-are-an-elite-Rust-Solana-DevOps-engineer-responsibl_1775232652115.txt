@@ -1,0 +1,175 @@
+You are an elite Rust + Solana + DevOps engineer responsible for turning this project into a fully working, production-ready system on Replit.
+
+Your mission: FIX, COMPLETE, VALIDATE, and DOCUMENT the entire system. Do not leave anything broken, mocked, or partially implemented.
+
+You are allowed to take as much time as needed to fully complete the task correctly. Do not rush. Accuracy and completeness are more important than speed.
+
+---
+
+## 1. Full Environment Setup
+
+* Install latest stable Rust + Cargo
+* Install required system dependencies (OpenSSL, pkg-config, etc.)
+* Ensure `.env` file is used and loaded correctly (dotenv)
+
+Required environment variables:
+
+* HELIUS_API_KEY
+* APEX_HTTP_RPC_URL
+* APEX_RPC_URL (WSS)
+
+If missing → create `.env.example` and wire them properly into the code.
+
+---
+
+## 2. Dependency & Build Fixes
+
+* Resolve ALL crate dependency issues
+* Fix version conflicts (serde, solana-sdk, etc.)
+* Ensure project builds cleanly:
+
+  * `cargo build`
+  * `cargo check`
+* No compile errors allowed
+
+---
+
+## 3. Code Completion (NO MOCKS)
+
+* Detect and implement any:
+
+  * Missing modules
+  * Stub functions
+  * TODOs
+  * Dead code
+* Ensure all modules are connected and actively used
+* Remove or replace any placeholder logic with REAL implementations
+
+---
+
+## 4. CRITICAL: Fix Helius Integration
+
+The system currently appears to NOT send any requests to Helius.
+
+You MUST:
+
+### A. Diagnose
+
+* Check if HTTP RPC client is actually used
+* Check if WebSocket connection is actually started
+* Verify API key is loaded correctly
+* Detect dead async tasks or unused networking code
+
+### B. Fix
+
+Ensure the system does ALL of the following:
+
+1. Establish HTTP RPC connection
+
+   * Example: getSlot / getLatestBlockhash
+
+2. Establish WebSocket connection
+
+   * logsSubscribe OR slotSubscribe
+
+3. Ensure Tokio runtime is:
+
+   * Running
+   * Spawning tasks correctly
+
+4. Ensure NO silent failures
+
+---
+
+## 5. Add Real Logging
+
+Add structured logs:
+
+* When Helius connection starts
+* When connection succeeds
+* Every outgoing RPC request
+* WebSocket subscription events
+* Clear error logging
+
+---
+
+## 6. Live Validation (VERY IMPORTANT)
+
+After fixing:
+
+* Run the system
+* Confirm that:
+
+  * RPC requests are actually being sent
+  * WebSocket stream is receiving data (slots/logs)
+
+If needed:
+
+* Add a simple test loop:
+
+  * Fetch slot every few seconds
+  * Print result
+
+---
+
+## 7. README.md Rewrite (PROFESSIONAL)
+
+Update README to reflect the REAL system after fixes:
+
+### Include:
+
+1. Project Overview
+
+2. Architecture (modules explained)
+
+3. Setup:
+
+   * Install Rust
+   * Environment configuration
+
+4. `.env` example:
+
+   * Where to put API key
+   * Where to put RPC URLs
+
+5. How to Run:
+
+   * cargo build
+   * cargo run
+
+6. Expected Logs:
+
+   * Successful Helius connection
+   * Incoming slot/log data
+
+7. Troubleshooting:
+
+   * No RPC requests being sent
+   * WebSocket not connecting
+   * Invalid API key
+
+---
+
+## 8. Final Output
+
+At the end, print:
+
+1. What was broken
+2. What you fixed
+3. What you added
+4. Confirmation:
+
+   * Helius HTTP requests WORKING
+   * WebSocket stream WORKING
+   * Project FULLY functional
+
+---
+
+## HARD RULES
+
+* DO NOT leave mocks or incomplete logic
+* DO NOT skip broken parts — FIX them
+* DO NOT assume anything works — VERIFY it
+* The system must be REAL and RUNNING, not theoretical
+
+You have full autonomy. Take your time and ensure everything is fully correct and production-ready.

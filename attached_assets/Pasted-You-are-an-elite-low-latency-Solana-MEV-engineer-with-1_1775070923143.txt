@@ -1,0 +1,73 @@
+You are an elite low-latency Solana MEV engineer with 10+ years experience building top 0.001% arbitrage bots. You have built systems using Jito ShredStream, Firedancer, RICH framework, GNN+Deep Q-Learning, FPGA offload, and Rust with AVX-512/AMX.
+
+
+
+Task: Build the COMPLETE production-grade prototype code for "Apex-MEV Neural Core 3.0" — the ultimate triangular/multi-hop predictive arbitrage bot on Solana.
+
+
+
+STRICT REQUIREMENTS (zero tolerance for errors or vulnerabilities):
+
+- All hot-path code must be lock-free, panic-free, no_std compatible where possible, constant-time, and memory-safe.
+
+- Use only safe Rust + unsafe where absolutely necessary with full justification and comments.
+
+- Every critical section must have extensive unit tests, property-based tests, and fuzz tests.
+
+- No panics in hot loops. All errors must be handled with proper Result/Option.
+
+- Security: No hardcoded secrets, use environment variables + secret manager stubs.
+
+- Zero vulnerabilities: Follow Rust secure coding guidelines, no buffer overflows, no race conditions, full Clippy + cargo audit compliance.
+
+- Performance: Target <0.2μs per 500+ paths using RICH color-coding + GNN inference stub + AVX-512.
+
+
+
+System Architecture (Apex 3.0):
+
+1. Ingress Layer: Simulate Jito ShredStream + Yellowstone gRPC using mock raw bytes. Use zero-copy parsing with pointer offsets. eBPF-style filtering (simulated).
+
+2. Core Engine: Hybrid RICH-GNN Quantum-Classical. Implement RICH color-coding for negative cycle detection + Candle.rs / tch-rs GNN stub for predictive multi-hop (up to 6 hops). Use AVX-512 for parallel price matrix.
+
+3. Trading Strategy: Predictive multi-DEX (Raydium, Orca, Meteora, Phoenix, Jupiter V6) + Launch sniping + Volatility-adjusted flash swaps.
+
+4. Execution Contract: Rust native program (not Huff) with zero-selector, Address Lookup Tables v0, per-swap checks, tight revert logic (Final_Balance < Initial + Min_Profit → INVALID opcode).
+
+5. Jito Stealth Layer: Simulate Jito Bundle + conditional tipping (RL-based 30-70% of profit) + DontFront integration stub.
+
+6. AI Risk Oracle: Deep Q-Learning stub for position sizing + Circuit Breaker + Anomaly detection.
+
+7. Safety Layer: Atomic revert, pre-simulation with local fork, full GNN prediction before sending.
+
+
+
+Project Structure (Cargo workspace):
+
+- Cargo.toml (workspace)
+
+- crates/ingress, core, strategy, solana-program, jito-handler, risk-oracle, safety, common
+
+
+
+Deliverables you must output:
+
+- Full Cargo.toml workspace + every crate's Cargo.toml
+
+- Complete source code for EVERY file with detailed comments explaining each function and why it is secure.
+
+- .replit and replit.nix files
+
+- README.md with exact steps to run the prototype + how to migrate to bare-metal production.
+
+- Security audit checklist at the top of every critical file.
+
+- Performance benchmarks (simulated) in comments.
+
+
+
+Output format: First give the full file tree, then output each file one by one in markdown code blocks with filename as header.
+
+
+
+Start building NOW. Do not summarize — output the complete working code.

@@ -1,0 +1,45 @@
+modules = ["rust-stable"]
+[agent]
+expertMode = true
+
+[userenv]
+
+[userenv.shared]
+APEX_RPC_URL = "wss://api.mainnet-beta.solana.com"
+APEX_KEYPAIR_PATH = "/tmp/mock-keypair.json"
+APEX_MIN_PROFIT_LAMPORTS = "5000"
+APEX_MAX_HOPS = "4"
+APEX_MAX_POSITION_LAMPORTS = "1000000000"
+APEX_JITO_URL = "https://mainnet.block-engine.jito.wtf"
+APEX_JITO_TIP_ACCOUNT = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"
+APEX_CB_THRESHOLD_LAMPORTS = "5000000000"
+APEX_CB_CONSECUTIVE_LOSSES = "5"
+APEX_SIMULATION_ONLY = "true"
+RUST_LOG = "info"
+APEX_ENV = "development"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cargo run --bin apex-mev 2>&1"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[nix]
+packages = ["nano"]

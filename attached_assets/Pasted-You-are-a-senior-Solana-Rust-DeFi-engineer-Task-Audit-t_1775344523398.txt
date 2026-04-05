@@ -1,0 +1,149 @@
+You are a senior Solana + Rust + DeFi engineer.
+
+## 🎯 Task
+
+Audit the project and determine clearly:
+
+👉 Does this bot actually take REAL flash loans and complete the full process (borrow → trade → repay) in a single transaction?
+
+---
+
+## 🌐 RPC Requirement (IMPORTANT)
+
+* Replace any usage of Helius with Alchemy RPC
+* Use:
+
+  * HTTPS RPC for transactions
+  * WebSocket (Alchemy) for subscriptions if needed
+* Remove any dependency on:
+
+  * transactionSubscribe (Helius-specific limitation)
+
+Ensure the bot works FULLY using Alchemy only.
+
+---
+
+## 🔍 Step 1: Flash Loan Verification (CRITICAL)
+
+Check the codebase and answer with PROOF:
+
+1. Is there integration with any lending protocol such as:
+
+   * Solend
+   * marginfi
+   * Kamino Finance
+
+2. Are there actual instructions for:
+
+   * flash borrow
+   * swap execution (Jupiter or AMMs)
+   * flash repay
+
+3. Are all of these included in ONE atomic transaction?
+
+4. Is the transaction:
+
+   * built
+   * signed
+   * sent to RPC (Alchemy)
+
+---
+
+## ⚠️ Step 2: If Flash Loans are NOT implemented
+
+You MUST clearly state:
+
+* ❌ Missing borrow instruction
+* ❌ Missing repay instruction
+* ❌ Missing lending protocol integration
+* ❌ If it's only simulation
+
+Then proceed to IMPLEMENT them.
+
+---
+
+## 🔧 Step 3: Implement Real Flash Loan Flow
+
+Add a working implementation that:
+
+1. Uses a real protocol (prefer Solend)
+
+2. Builds a transaction with:
+
+   * borrow instruction
+   * swap instructions (via Jupiter routes)
+   * repay instruction
+
+3. Ensures:
+
+   * same transaction (atomic)
+   * correct accounts passed
+   * correct token balances
+
+---
+
+## 🔁 Step 4: Full Execution Pipeline Check
+
+Verify the full pipeline works:
+
+price update → opportunity detection → simulation → transaction build → signing → sending
+
+Fix ANY break in this chain.
+
+---
+
+## 💰 Step 5: Requirements for Execution
+
+List EVERYTHING required for flash loans to work:
+
+* required accounts
+* required liquidity pools
+* minimum capital (if needed)
+* RPC requirements (Alchemy)
+* priority fees
+* slippage handling
+
+---
+
+## 🧪 Step 6: Add Debug Output
+
+Log clearly:
+
+* when a flash loan is attempted
+* borrow amount
+* route used
+* expected profit
+* transaction result
+
+---
+
+## 📦 Step 7: Output
+
+You must provide:
+
+1. ✅ Final verdict:
+
+   * "Flash loans are working" OR "Not implemented"
+
+2. 🧨 List of missing parts
+
+3. 🧱 Full working code for:
+
+   * flash borrow
+   * swap
+   * repay
+
+4. 🚀 Ensure the bot reaches:
+
+   * transaction SENT stage (via Alchemy RPC)
+
+---
+
+## ⚠️ Rules
+
+* Do NOT assume anything works — verify
+* Do NOT stop at simulation
+* Provide REAL executable code
+* Ensure compatibility with Alchemy (no Helius dependency)
+
+Start now.

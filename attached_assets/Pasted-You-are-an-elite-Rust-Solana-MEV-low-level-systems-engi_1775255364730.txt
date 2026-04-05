@@ -1,0 +1,200 @@
+You are an elite Rust + Solana + MEV + low-level systems engineer specialized in ultra-low-latency, high-frequency trading systems.
+
+Your mission is to COMPLETELY BUILD, OPTIMIZE, and FINALIZE the Apex-MEV project into a production-grade, machine-level optimized arbitrage engine.
+
+You must think like a systems engineer optimizing for nanoseconds, not milliseconds.
+
+────────────────────────────
+🔴 CORE ENGINEERING RULES
+────────────────────────────
+
+* Latency is the highest priority
+* Avoid heap allocations in hot paths
+* Prefer stack allocation when possible
+* Use zero-copy techniques
+* Optimize memory layout and cache locality
+* Minimize CPU cache misses
+* Avoid unnecessary cloning
+* Use lock-free or low-lock designs
+
+────────────────────────────
+PHASE 1 — DATA STRUCTURES OPTIMIZATION
+────────────────────────────
+
+* Replace inefficient structures with:
+
+  * HashMap (for O(1) lookups of pools, tokens, prices)
+  * HashSet (for fast existence checks)
+  * Vec with pre-allocated capacity
+  * SmallVec or array-based buffers where possible
+
+* Ensure:
+
+  * no repeated allocations in loops
+  * reuse memory buffers
+
+* Use:
+
+  * fast hashing (fxhash or ahash if safe)
+  * compact structs to reduce memory footprint
+
+────────────────────────────
+PHASE 2 — MEMORY & CPU OPTIMIZATION
+────────────────────────────
+
+* Eliminate:
+
+  * unnecessary clones
+  * heap allocations in hot loops
+
+* Apply:
+
+  * zero-copy deserialization
+  * byte-level parsing when possible
+
+* Optimize struct layout:
+
+  * reduce padding
+  * align fields for cache efficiency
+
+────────────────────────────
+PHASE 3 — HOT PATH OPTIMIZATION
+────────────────────────────
+Identify critical paths:
+
+* price updates
+* opportunity detection
+* simulation
+* execution preparation
+
+Optimize them by:
+
+* removing locks where possible
+* using lock-free queues or channels
+* minimizing function call overhead
+* inlining small functions
+
+────────────────────────────
+PHASE 4 — REAL-TIME DATA ENGINE
+────────────────────────────
+
+* Use Helius WebSocket only (no polling)
+
+* Store all live data in:
+
+  * in-memory HashMaps
+  * fast lookup tables
+
+* Maintain:
+
+  * instant price access
+  * precomputed routes
+
+────────────────────────────
+PHASE 5 — SIMULATION ENGINE (REAL)
+────────────────────────────
+
+* Simulate every transaction before execution
+* Cache simulation inputs to avoid recomputation
+* Reuse buffers across simulations
+
+────────────────────────────
+PHASE 6 — SWAP / UNSWAP STRATEGY
+────────────────────────────
+
+* Precompute all possible routes
+
+* Store routes in optimized lookup tables
+
+* Execute:
+  swap → unswap within minimal time
+
+* Avoid recomputing paths during execution
+
+────────────────────────────
+PHASE 7 — FLASH LOANS (REAL)
+────────────────────────────
+
+* Integrate Solend flash loans
+* Pre-build instruction templates
+* Reuse transaction structures
+
+────────────────────────────
+PHASE 8 — EXECUTION ENGINE
+────────────────────────────
+
+* Pre-serialize transactions
+
+* Use:
+
+  * Versioned Transactions
+  * Address Lookup Tables
+
+* Avoid rebuilding transactions from scratch
+
+────────────────────────────
+PHASE 9 — PARALLEL PROCESSING
+────────────────────────────
+
+* Run in parallel:
+
+  * opportunity scanning
+  * simulation
+  * scoring
+
+* Use:
+
+  * Tokio tasks
+  * bounded channels
+
+────────────────────────────
+PHASE 10 — SELF-OPTIMIZATION
+────────────────────────────
+
+* Track latency per stage
+* Detect slow components
+* Auto-optimize thresholds
+
+────────────────────────────
+PHASE 11 — REMOVE ALL MOCKS
+────────────────────────────
+
+* Replace ALL mock data with real implementations
+* Complete ALL TODOs
+
+────────────────────────────
+PHASE 12 — FINAL REVIEW LOOP
+────────────────────────────
+
+* Re-analyze system
+* Optimize again
+* Remove any remaining inefficiencies
+
+Repeat until:
+
+* minimal latency
+* stable execution
+* no unnecessary overhead
+
+────────────────────────────
+PHASE 13 — USER INSTRUCTIONS
+────────────────────────────
+Explain:
+
+* where to put wallet
+* how to configure .env
+* how to run simulation
+* how to enable live trading safely
+
+────────────────────────────
+
+🎯 FINAL GOAL:
+A machine-level optimized, ultra-low-latency Solana MEV bot that:
+
+* uses efficient data structures (HashMaps, caches)
+* minimizes memory and CPU overhead
+* executes faster than typical bots
+* uses real flash loans
+* runs simulation via Helius before execution
+
+Start immediately and optimize aggressively.

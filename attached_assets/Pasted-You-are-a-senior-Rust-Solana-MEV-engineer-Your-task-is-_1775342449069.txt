@@ -1,0 +1,157 @@
+You are a senior Rust + Solana + MEV engineer.
+
+Your task is to fully audit, debug, and fix my Apex-MEV bot so that it actually executes profitable trades using REAL flash loans on Solana.
+
+---
+
+## 🎯 Main Goal
+
+The bot is currently:
+
+* Receiving slot updates ✅
+* Receiving Jupiter price matrix ✅
+* Connected to RPC ✅
+  BUT:
+* NOT executing any trades ❌
+* NOT taking real flash loans ❌
+* NOT generating profit ❌
+
+You must find EXACTLY why and fix it.
+
+---
+
+## 🔍 Step 1: Full System Audit
+
+Analyze the entire project including:
+
+* apex-engine
+* apex-executor
+* apex-core
+* ingress (helius_ws / rpc)
+* config (.env)
+
+Find:
+
+* Missing logic
+* Disabled execution paths
+* Wrong thresholds
+* Dead code
+* Incorrect async handling
+* Any place where execution is skipped silently
+
+---
+
+## ⚡ Step 2: Flash Loan Verification
+
+Check if REAL flash loans are being used:
+
+* Is there integration with Solend / marginfi / Kamino?
+* Is the code only simulating trades?
+* Are transactions actually built and signed?
+* Are instructions for borrow + swap + repay included?
+
+If NOT:
+→ Implement real flash loan flow using Solana instructions
+
+---
+
+## 🔁 Step 3: Execution Path Debugging
+
+Trace full pipeline:
+
+price update → opportunity detection → route building → transaction creation → signing → sending
+
+For each step:
+
+* Add detailed logs
+* Ensure it's actually triggered
+* Fix any break in the pipeline
+
+---
+
+## 💰 Step 4: Profitability Logic Fix
+
+Check:
+
+* APEX_MIN_PROFIT_LAMPORTS (maybe too high?)
+* Fees (Jupiter, priority fees, slippage)
+* Pathfinding logic
+* Max hops
+
+Fix so that:
+
+* Small profitable trades are allowed
+* Realistic profit thresholds are used
+
+---
+
+## 🌐 Step 5: RPC / Helius Issues
+
+We are getting:
+"transactionSubscribe is not available on free plan"
+
+Fix by:
+
+* Removing dependency on transactionSubscribe
+* Using:
+
+  * logsSubscribe OR
+  * polling OR
+  * confirmed block scanning
+
+Ensure bot still detects opportunities WITHOUT paid Helius
+
+---
+
+## 🔧 Step 6: Force First Trade (CRITICAL)
+
+Modify bot to:
+
+* Execute at least ONE real trade (even with tiny profit or break-even)
+* Disable overly strict checks temporarily
+* Print full transaction details
+
+---
+
+## 🧪 Step 7: Add Debug Mode
+
+Create a DEBUG mode that:
+
+* Logs every opportunity
+* Logs why trades are rejected
+* Logs expected vs actual profit
+* Logs transaction simulation result
+
+---
+
+## 📦 Step 8: Final Output
+
+You must:
+
+1. List ALL issues found
+2. Show EXACT code changes
+3. Apply fixes directly
+4. Ensure bot reaches "sending transaction" stage
+
+---
+
+## ⚠️ Important Rules
+
+* Do NOT assume logic works — verify everything
+* Do NOT skip execution code paths
+* Do NOT leave TODOs
+* Prefer working code over clean code
+
+---
+
+## ✅ Success Criteria
+
+* Bot detects opportunities
+* Bot builds transaction
+* Bot signs transaction
+* Bot sends transaction
+* (Optional) Bot executes flash loan
+
+---
+
+Start now. Be aggressive in debugging. Fix everything blocking execution.

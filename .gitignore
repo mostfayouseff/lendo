@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# Env
+.env
+
+# Logs
+*.log
+
+# Mac / Linux junk
+.DS_Store
+

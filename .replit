@@ -5,7 +5,6 @@ expertMode = true
 [userenv]
 
 [userenv.shared]
-APEX_RPC_URL = "wss://mainnet.helius-rpc.com/?api-key=61a925f1-6728-44ea-b2e8-791ea5a133ad"
 APEX_KEYPAIR_PATH = "live-key.json"
 APEX_MIN_PROFIT_LAMPORTS = "0"
 APEX_MAX_HOPS = "4"
@@ -18,10 +17,6 @@ APEX_SIMULATION_ONLY = "false"
 RUST_LOG = "info"
 APEX_ENV = "production"
 APEX_FLASH_LOAN_ENABLED = "true"
-APEX_HTTP_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=61a925f1-6728-44ea-b2e8-791ea5a133ad"
-HELIUS_API_KEY = "61a925f1-6728-44ea-b2e8-791ea5a133ad"
-ALCHEMY_API_KEY = "vgxgo_P-PLd3r1f-Llin8"
-JUPITER_API_KEY = "3a151309-ead7-4a6a-836f-4a142e1467ac"
 APEX_AUTO_OPTIMIZE = "true"
 APEX_SLIPPAGE_BPS = "50"
 APEX_MAX_DAILY_LOSS_LAMPORTS = "500000000"

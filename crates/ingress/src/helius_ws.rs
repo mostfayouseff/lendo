@@ -136,20 +136,15 @@ impl HeliusTransactionStream {
         );
 
         // Subscribe to logsSubscribe for each DEX program
-        // Helius supports standard Solana WebSocket methods
+        // Standard Solana WebSocket method — supported on all plans
         for (i, &program_id) in DEX_PROGRAMS.iter().enumerate() {
             Self::send_logs_subscribe(&mut ws, i as u64 + 1, program_id).await?;
         }
 
-        // Also try transactionSubscribe (Helius-enhanced method) for richer data
-        // This gives full transaction data including account changes
-        let tx_sub_id = DEX_PROGRAMS.len() as u64 + 100;
-        Self::send_transaction_subscribe(&mut ws, tx_sub_id).await?;
-
         info!(
-            programs   = DEX_PROGRAMS.len(),
-            host       = HELIUS_WS_HOST,
-            "Helius WS: LIVE — logsSubscribe + transactionSubscribe active for all DEX programs"
+            programs = DEX_PROGRAMS.len(),
+            host     = HELIUS_WS_HOST,
+            "Helius WS: LIVE — logsSubscribe active for all DEX programs"
         );
 
         let mut event_count: u64 = 0;
@@ -276,36 +271,6 @@ impl HeliusTransactionStream {
         Ok(())
     }
 
-    async fn send_transaction_subscribe(
-        ws: &mut (impl futures_util::Sink<tokio_tungstenite::tungstenite::Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
-        id: u64,
-    ) -> anyhow::Result<()> {
-        use futures_util::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
-
-        // Helius transactionSubscribe — streams full transactions matching filter
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "transactionSubscribe",
-            "params": [
-                {
-                    "accountInclude": DEX_PROGRAMS
-                },
-                {
-                    "commitment": "processed",
-                    "encoding": "base64",
-                    "transactionDetails": "signatures",
-                    "showRewards": false,
-                    "maxSupportedTransactionVersion": 0
-                }
-            ]
-        });
-
-        debug!(id, "Helius WS: sending transactionSubscribe for all DEX programs");
-        ws.send(Message::Text(msg.to_string())).await?;
-        Ok(())
-    }
 }
 
 // ── Alchemy WebSocket Stream (FALLBACK) ─────────────────────────────────────────

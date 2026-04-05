@@ -1,17 +1,15 @@
 // =============================================================================
 // PRICE MONITOR — Self-Healing Multi-Source Price Feed
 //
-// SELF-HEALING ENDPOINT PRIORITY:
-//   1. Helius DAS API (getAssetBatch) — Uses the existing Helius API key.
-//      Returns price_info.price_per_token in USDC for each token.
-//      Endpoint: https://mainnet.helius-rpc.com/?api-key=<KEY>
-//      Method: getAssetBatch (JSON-RPC POST)
+// SOURCE PRIORITY:
+//   1. Jupiter Price v3 API — https://api.jup.ag/price/v3?ids=...
+//      Uses x-api-key header if JUPITER_API_KEY is set.
+//      Returns real-time USD prices for all tracked tokens.
 //
-//   2. CoinGecko public API — No key required.
-//      Maps a curated subset of tokens to CoinGecko IDs.
-//      Endpoint: https://api.coingecko.com/api/v3/simple/price
+//   2. CoinGecko public API — no key required.
+//      Maps tokens to CoinGecko IDs and fetches USD prices.
 //
-//   3. Stale cache — Last resort. Always logged clearly.
+//   3. Stale cache — last resort, always logged clearly.
 //
 // LOGGING:
 //   "LIVE DATA SOURCE: JUPITER" on any successful price update
@@ -27,7 +25,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 const POLL_INTERVAL_MS: u64 = 2_000;
 const HTTP_TIMEOUT_MS: u64 = 10_000;
@@ -44,26 +42,24 @@ pub struct KnownToken {
     pub mint: &'static str,
     pub decimals: u32,
     pub quote_amount: u64,
-    /// CoinGecko coin ID (empty string = not mapped, price comes from Helius only)
+    /// CoinGecko coin ID (empty string = not mapped)
     pub coingecko_id: &'static str,
 }
 
 /// Public type alias (used externally).
 pub use KnownToken as TokenInfo;
 
-/// 12-token universe. All mint addresses are verified Solana mainnet SPL token mints.
+/// 10-token universe. All mint addresses verified against Jupiter Price API (2026-04).
 pub const TOKENS: &[KnownToken] = &[
     KnownToken { symbol: "SOL",     mint: "So11111111111111111111111111111111111111112",    decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "solana" },
     KnownToken { symbol: "USDC",    mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, quote_amount: 1_000_000, coingecko_id: "usd-coin" },
     KnownToken { symbol: "USDT",    mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  decimals: 6, quote_amount: 1_000_000, coingecko_id: "tether" },
-    KnownToken { symbol: "RAY",     mint: "4k3Dyjzvzp8eMZWUXbBCjp4YzTKgLccjZhTSDM9YuVaPwxo",  decimals: 6, quote_amount: 1_000_000, coingecko_id: "raydium" },
     KnownToken { symbol: "ORCA",    mint: "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",   decimals: 6, quote_amount: 1_000_000, coingecko_id: "orca" },
     KnownToken { symbol: "JUP",     mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   decimals: 6, quote_amount: 1_000_000, coingecko_id: "jupiter-exchange-solana" },
     KnownToken { symbol: "mSOL",    mint: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "msol" },
     KnownToken { symbol: "JitoSOL", mint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "jito-staked-sol" },
     KnownToken { symbol: "BONK",    mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", decimals: 5, quote_amount: 1_000_000, coingecko_id: "bonk" },
     KnownToken { symbol: "WIF",     mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", decimals: 6, quote_amount: 1_000_000, coingecko_id: "dogwifcoin" },
-    KnownToken { symbol: "PYTH",    mint: "HZ1JovNiVvGrG4nP3in4DkMPdHBBbPoBFNj6RRmkKxqY", decimals: 6, quote_amount: 1_000_000, coingecko_id: "pyth-network" },
     KnownToken { symbol: "RENDER",  mint: "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",  decimals: 8, quote_amount: 1_000_000, coingecko_id: "render-token" },
 ];
 
@@ -72,53 +68,43 @@ pub fn build_token_info_map() -> HashMap<&'static str, &'static KnownToken> {
     TOKENS.iter().map(|t| (t.mint, t)).collect()
 }
 
-// ── Helius DAS response types ─────────────────────────────────────────────────
+// ── Jupiter Price v3 response types ──────────────────────────────────────────
+// Actual API response format (verified 2026-04):
+// {
+//   "<mint_address>": {
+//     "usdPrice": 79.35,
+//     "liquidity": 658480731.13,
+//     "decimals": 9,
+//     "priceChange24h": -0.69,
+//     "blockId": 411213741,
+//     "createdAt": "..."
+//   },
+//   ...
+// }
+// Note: response is a flat object, NOT wrapped in {"data": {...}}
 
 #[derive(Debug, Deserialize)]
-struct HeliusDasResponse {
-    result: Option<Vec<HeliusDasAsset>>,
-    error: Option<HeliusDasError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeliusDasError {
-    code: i64,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeliusDasAsset {
-    id: Option<String>,
-    token_info: Option<HeliusTokenInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeliusTokenInfo {
-    price_info: Option<HeliusPriceInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeliusPriceInfo {
-    price_per_token: Option<f64>,
+#[serde(rename_all = "camelCase")]
+struct JupiterPriceV3Item {
+    usd_price: Option<f64>,
 }
 
 // ── CoinGecko response types ──────────────────────────────────────────────────
 
-// CoinGecko response: {"solana": {"usd": 78.87}, "usd-coin": {"usd": 1.0}, ...}
 type CoinGeckoResponse = HashMap<String, HashMap<String, f64>>;
 
 // ── Price source enum ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 enum PriceSource {
-    HeliusDas,
+    JupiterV3,
     CoinGecko,
 }
 
 impl PriceSource {
     fn name(&self) -> &'static str {
         match self {
-            PriceSource::HeliusDas => "Helius DAS API (getAssetBatch)",
+            PriceSource::JupiterV3 => "Jupiter Price v3 API",
             PriceSource::CoinGecko => "CoinGecko public API",
         }
     }
@@ -128,19 +114,17 @@ impl PriceSource {
 
 /// Multi-source price monitor with self-healing source discovery.
 ///
-/// Primary: Helius DAS API (getAssetBatch) — returns price_info per token.
-/// Fallback: CoinGecko public API — no key required.
+/// Primary:    Jupiter Price v3 API — real-time prices for all tokens.
+/// Fallback:   CoinGecko public API — no key required.
 /// Last resort: stale cache — always logged clearly.
 pub struct JupiterMonitor;
 
 impl JupiterMonitor {
-    /// Spawn the monitor. Returns the receiver channel for price-edge updates.
     #[must_use]
     pub fn spawn() -> mpsc::Receiver<Vec<MarketEdge>> {
         Self::spawn_with_key(None)
     }
 
-    /// Spawn with an optional Helius API key (used for the primary DAS source).
     #[must_use]
     pub fn spawn_with_key(api_key: Option<String>) -> mpsc::Receiver<Vec<MarketEdge>> {
         let (tx, rx) = mpsc::channel(64);
@@ -165,28 +149,20 @@ impl JupiterMonitor {
         info!(
             tokens     = TOKENS.len(),
             poll_ms    = POLL_INTERVAL_MS,
-            has_helius = api_key.is_some(),
-            "Price monitor started — sources: Helius DAS → CoinGecko → stale cache"
+            has_key    = api_key.is_some(),
+            "Price monitor started — sources: Jupiter Price v3 → CoinGecko → stale cache"
         );
 
         let mut price_cache: HashMap<String, f64> = HashMap::new();
-        let mut active_source = if api_key.is_some() {
-            PriceSource::HeliusDas
-        } else {
-            PriceSource::CoinGecko
-        };
+        let mut active_source = PriceSource::JupiterV3;
         let mut consecutive_failures: u32 = 0;
 
         loop {
             sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
 
             let result = match &active_source {
-                PriceSource::HeliusDas => {
-                    if let Some(ref key) = api_key {
-                        Self::fetch_helius_das(&client, key).await
-                    } else {
-                        Err(anyhow::anyhow!("No Helius API key"))
-                    }
+                PriceSource::JupiterV3 => {
+                    Self::fetch_jupiter_v3(&client, api_key.as_deref()).await
                 }
                 PriceSource::CoinGecko => {
                     Self::fetch_coingecko(&client).await
@@ -197,7 +173,7 @@ impl JupiterMonitor {
                 Ok(prices) if !prices.is_empty() => {
                     if consecutive_failures > 0 {
                         info!(
-                            source = active_source.name(),
+                            source         = active_source.name(),
                             after_failures = consecutive_failures,
                             "NEW API DISCOVERED AND VERIFIED: {} is live and returning prices",
                             active_source.name()
@@ -223,17 +199,8 @@ impl JupiterMonitor {
                         continue;
                     }
 
-                    debug!(
-                        source        = active_source.name(),
-                        edges         = edges.len(),
-                        sol_price_usd = format!("{:.2}", sol_price),
-                        tokens_priced = prices.len(),
-                        "LIVE DATA SOURCE: JUPITER — price matrix updated"
-                    );
-
-                    // Log at info level less frequently to avoid log noise
-                    if consecutive_failures == 0 {
-                        // Only log every few cycles at info
+                    // Log at info level every 30s to avoid noise
+                    {
                         static LAST_INFO: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(0);
                         let now = std::time::SystemTime::now()
@@ -258,14 +225,14 @@ impl JupiterMonitor {
                         return;
                     }
                 }
-                Ok(empty) => {
+                Ok(_empty) => {
                     consecutive_failures += 1;
                     warn!(
                         source   = active_source.name(),
                         failures = consecutive_failures,
-                        count    = empty.len(),
                         "JUPITER API FAILED — empty price response, searching for alternative"
                     );
+                    active_source = Self::try_failover(&client, &active_source, &api_key, &mut price_cache, sol_mint, &tx).await;
                 }
                 Err(e) => {
                     consecutive_failures += 1;
@@ -275,122 +242,113 @@ impl JupiterMonitor {
                         failures = consecutive_failures,
                         "JUPITER API FAILED — SEARCHING FOR ALTERNATIVE price source"
                     );
-
-                    // Try the other source
-                    let next_source = match &active_source {
-                        PriceSource::HeliusDas if api_key.is_some() => PriceSource::CoinGecko,
-                        PriceSource::CoinGecko if api_key.is_some() => PriceSource::HeliusDas,
-                        _ => PriceSource::CoinGecko,
-                    };
-
-                    let next_result = match &next_source {
-                        PriceSource::HeliusDas => {
-                            if let Some(ref key) = api_key {
-                                Self::fetch_helius_das(&client, key).await
-                            } else {
-                                Err(anyhow::anyhow!("No key"))
-                            }
-                        }
-                        PriceSource::CoinGecko => Self::fetch_coingecko(&client).await,
-                    };
-
-                    match next_result {
-                        Ok(prices) if !prices.is_empty() => {
-                            info!(
-                                from   = active_source.name(),
-                                to     = next_source.name(),
-                                "NEW API DISCOVERED AND VERIFIED: switching to working price source"
-                            );
-                            active_source = next_source;
-                            consecutive_failures = 0;
-                            for (mint, price) in &prices {
-                                price_cache.insert(mint.clone(), *price);
-                            }
-
-                            let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
-                            if sol_price > 0.0 {
-                                let edges = build_edges_from_prices(&price_cache, sol_price);
-                                if !edges.is_empty() {
-                                    let _ = tx.send(edges).await;
-                                }
-                            }
-                        }
-                        _ => {
-                            // Use stale cache
-                            let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
-                            if sol_price > 0.0 && !price_cache.is_empty() {
-                                warn!(
-                                    sol_price,
-                                    cached_tokens = price_cache.len(),
-                                    "Price monitor: ALL sources failed — using STALE CACHE"
-                                );
-                                let edges = build_edges_from_prices(&price_cache, sol_price);
-                                if !edges.is_empty() {
-                                    let _ = tx.send(edges).await;
-                                }
-                            } else {
-                                warn!("Price monitor: all sources failed, no stale cache — waiting");
-                            }
-                        }
-                    }
+                    active_source = Self::try_failover(&client, &active_source, &api_key, &mut price_cache, sol_mint, &tx).await;
                 }
             }
         }
     }
 
-    /// Fetch prices via Helius DAS API — getAssetBatch returns price_info per token.
-    async fn fetch_helius_das(
+    async fn try_failover(
         client: &Client,
-        api_key: &str,
-    ) -> anyhow::Result<HashMap<String, f64>> {
-        let url = format!("https://mainnet.helius-rpc.com/?api-key={}", api_key);
-        let mints: Vec<&str> = TOKENS.iter().map(|t| t.mint).collect();
+        current: &PriceSource,
+        _api_key: &Option<String>,
+        price_cache: &mut HashMap<String, f64>,
+        sol_mint: &str,
+        tx: &mpsc::Sender<Vec<MarketEdge>>,
+    ) -> PriceSource {
+        let next = match current {
+            PriceSource::JupiterV3 => PriceSource::CoinGecko,
+            PriceSource::CoinGecko => PriceSource::JupiterV3,
+        };
 
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getAssetBatch",
-            "params": {
-                "ids": mints
+        let next_result = match &next {
+            PriceSource::JupiterV3 => Self::fetch_jupiter_v3(client, None).await,
+            PriceSource::CoinGecko => Self::fetch_coingecko(client).await,
+        };
+
+        match next_result {
+            Ok(prices) if !prices.is_empty() => {
+                info!(
+                    from = current.name(),
+                    to   = next.name(),
+                    "NEW API DISCOVERED AND VERIFIED: switching to working price source"
+                );
+                for (mint, price) in &prices {
+                    price_cache.insert(mint.clone(), *price);
+                }
+                let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
+                if sol_price > 0.0 {
+                    let edges = build_edges_from_prices(price_cache, sol_price);
+                    if !edges.is_empty() {
+                        let _ = tx.send(edges).await;
+                    }
+                }
+                next
             }
-        });
+            _ => {
+                // Both failed — use stale cache if available
+                let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
+                if sol_price > 0.0 && !price_cache.is_empty() {
+                    warn!(
+                        sol_price,
+                        cached_tokens = price_cache.len(),
+                        "Price monitor: ALL sources failed — using STALE CACHE"
+                    );
+                    let edges = build_edges_from_prices(price_cache, sol_price);
+                    if !edges.is_empty() {
+                        let _ = tx.send(edges).await;
+                    }
+                } else {
+                    warn!("Price monitor: all sources failed, no stale cache — waiting");
+                }
+                current.clone()
+            }
+        }
+    }
 
-        let resp = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await?;
+    /// Fetch prices via Jupiter Price v3 API.
+    /// GET https://api.jup.ag/price/v3?ids=<mint1>,<mint2>,...
+    /// Optional header: x-api-key
+    async fn fetch_jupiter_v3(
+        client: &Client,
+        api_key: Option<&str>,
+    ) -> anyhow::Result<HashMap<String, f64>> {
+        let ids: Vec<&str> = TOKENS.iter().map(|t| t.mint).collect();
+        let ids_param = ids.join(",");
+        let url = format!("https://api.jup.ag/price/v3?ids={}", ids_param);
+
+        let mut req = client
+            .get(&url)
+            .header("accept", "application/json");
+
+        if let Some(key) = api_key {
+            req = req.header("x-api-key", key);
+        }
+
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Helius DAS HTTP {}: {}", status, &text[..text.len().min(200)]));
-        }
-
-        let das_resp: HeliusDasResponse = resp.json().await?;
-
-        if let Some(err) = das_resp.error {
             return Err(anyhow::anyhow!(
-                "Helius DAS error {}: {}",
-                err.code,
-                err.message
+                "Jupiter v3 HTTP {}: {}",
+                status,
+                &text[..text.len().min(300)]
             ));
         }
 
-        let mut prices = HashMap::new();
-        for asset in das_resp.result.unwrap_or_default() {
-            let mint = match asset.id {
-                Some(ref id) => id.clone(),
-                None => continue,
-            };
-            let price = asset
-                .token_info
-                .and_then(|ti| ti.price_info)
-                .and_then(|pi| pi.price_per_token)
-                .unwrap_or(0.0);
+        let body_text = resp.text().await?;
 
-            if price > 0.0 {
-                prices.insert(mint, price);
+        // Parse as flat HashMap<mint, item> — verified API format (2026-04)
+        let data: HashMap<String, JupiterPriceV3Item> = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Jupiter v3 JSON parse error: {e} — body: {}", &body_text[..body_text.len().min(300)]))?;
+
+        let mut prices = HashMap::new();
+        for (mint, item) in data {
+            if let Some(price) = item.usd_price {
+                if price > 0.0 {
+                    prices.insert(mint, price);
+                }
             }
         }
 
@@ -398,7 +356,6 @@ impl JupiterMonitor {
     }
 
     /// Fetch prices via CoinGecko public API.
-    /// Maps all TOKENS with a coingecko_id to their USD price.
     async fn fetch_coingecko(client: &Client) -> anyhow::Result<HashMap<String, f64>> {
         let coin_ids: Vec<&str> = TOKENS
             .iter()
@@ -425,12 +382,15 @@ impl JupiterMonitor {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("CoinGecko HTTP {}: {}", status, &text[..text.len().min(200)]));
+            return Err(anyhow::anyhow!(
+                "CoinGecko HTTP {}: {}",
+                status,
+                &text[..text.len().min(200)]
+            ));
         }
 
         let cg: CoinGeckoResponse = resp.json().await?;
 
-        // Build a coingecko_id → mint reverse map
         let id_to_mint: HashMap<&str, &str> = TOKENS
             .iter()
             .filter(|t| !t.coingecko_id.is_empty())
@@ -482,7 +442,9 @@ fn build_edges_from_prices(
         };
 
         for j in 0..TOKENS.len() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let tb = &TOKENS[j];
             let price_b = match price_cache.get(tb.mint) {
                 Some(&p) if p > 0.0 => p,

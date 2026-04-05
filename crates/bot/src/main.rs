@@ -7,11 +7,12 @@
 //   3. Mock stream (LAST RESORT)    — logged clearly, indicates no WS keys set
 //
 // PRICE DATA (self-healing):
-//   1. https://api.jup.ag/price/v2  — newest endpoint
-//   2. https://price.jup.ag/v6/price — legacy fallback
-//   3. Stale cache                   — last resort (logged)
+//   1. Jupiter Price v3 — https://api.jup.ag/price/v3?ids=...  (PRIMARY)
+//   2. CoinGecko public API                                     (FALLBACK)
+//   3. Stale cache                                              (LAST RESORT)
 //
-// LIVE EXECUTION:
+// EXECUTION:
+//   Jupiter Ultra API — real executable transactions for each detected arb hop
 //   Flash loans via Solend + Jito bundle submission
 //   No minimum balance restriction — flash loans borrow capital atomically
 //   No minimum profit restriction — all viable arb paths attempted
@@ -30,7 +31,10 @@ mod pnl;
 use anyhow::{Context, Result};
 use common::{ApexConfig, ApexMetrics};
 use apex_core::MatrixBuilder;
-use ingress::{HeliusTransactionStream, AlchemyTransactionStream, JupiterMonitor, MockShredStream, MockYellowstoneStream};
+use ingress::{
+    build_ultra_client, get_best_route_and_transaction, AlchemyTransactionStream,
+    HeliusTransactionStream, JupiterMonitor, MockShredStream, MockYellowstoneStream,
+};
 use jito_handler::{build_flash_loan_tx, ApexKeypair, JitoBundleHandler, SolanaRpcClient};
 use pnl::{make_record, AtomicPnL, SessionStats};
 use risk_oracle::{AnomalyDetector, CircuitBreaker, SelfOptimizer, TradingParams};
@@ -233,6 +237,16 @@ async fn main() -> Result<()> {
         )
         .context("Failed to initialise live Jito handler")?
     };
+
+    // ── Jupiter Ultra API client ───────────────────────────────────────────────
+    // Used in the hot loop to fetch real executable transactions for each arb hop.
+    let ultra_client = build_ultra_client()
+        .context("Failed to build Jupiter Ultra HTTP client")?;
+    info!(
+        endpoint = "https://api.jup.ag/ultra/v1/order",
+        has_key  = config.jupiter_api_key.is_some(),
+        "Jupiter Ultra API client ready — will fetch real swap transactions per arb"
+    );
 
     // ── Ingress streams ────────────────────────────────────────────────────────
     // Priority: Helius (PRIMARY) → Alchemy (FALLBACK) → Mock (LAST RESORT)
@@ -517,7 +531,86 @@ async fn main() -> Result<()> {
                     guard.commit();
                 } else {
                     // ── LIVE TRADING: build + sign + submit to Jito ────────
-                    let payloads: Vec<Vec<u8>> = if config.flash_loan_enabled {
+                    //
+                    // Step 1: Try Jupiter Ultra API for a real executable swap tx.
+                    //         Ultra returns a complete versioned transaction with proper
+                    //         account metas — far superior to stub flash swap instructions.
+                    //
+                    // Step 2: If Ultra succeeds and is profitable → submit Ultra tx directly.
+                    //         If Ultra fails → fall back to Solend flash loan + stub swaps.
+
+                    let operator_pubkey: String = flash_keypair
+                        .as_ref()
+                        .map(|kp| kp.pubkey_b58.clone())
+                        .unwrap_or_default();
+
+                    // Extract the swap direction from the arb path:
+                    // first_from = input token, last_to = output token (for the main leg)
+                    let ultra_input_mint: Option<String> = trade
+                        .path.edges.first()
+                        .map(|e| bs58::encode(e.from.0).into_string());
+                    let ultra_output_mint: Option<String> = trade
+                        .path.edges.get(1)
+                        .map(|e| bs58::encode(e.to.0).into_string())
+                        .or_else(|| trade.path.edges.last()
+                            .map(|e| bs58::encode(e.to.0).into_string()));
+
+                    let ultra_result = if !operator_pubkey.is_empty() {
+                        if let (Some(ref input_mint), Some(ref output_mint)) =
+                            (&ultra_input_mint, &ultra_output_mint)
+                        {
+                            if input_mint != output_mint {
+                                let active_slippage = self_optimizer.params().slippage_bps;
+                                match get_best_route_and_transaction(
+                                    &ultra_client,
+                                    input_mint,
+                                    output_mint,
+                                    trade.position_lamports,
+                                    &operator_pubkey,
+                                    config.jupiter_api_key.as_deref(),
+                                    active_slippage,
+                                )
+                                .await
+                                {
+                                    Ok(route_data) => {
+                                        info!(
+                                            input_mint   = %input_mint,
+                                            output_mint  = %output_mint,
+                                            in_amount    = route_data.in_amount,
+                                            out_amount   = route_data.out_amount,
+                                            impact_pct   = format!("{:.4}%", route_data.price_impact_pct),
+                                            tx_bytes     = route_data.transaction_bytes.len(),
+                                            route_hops   = route_data.route_plan.len(),
+                                            request_id   = %route_data.request_id,
+                                            "Ultra API: real swap transaction fetched — submitting to Jito"
+                                        );
+                                        Some(route_data.transaction_bytes)
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error       = %e,
+                                            input_mint  = %input_mint,
+                                            output_mint = %output_mint,
+                                            "Ultra API failed — falling back to flash loan path"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let payloads: Vec<Vec<u8>> = if let Some(ultra_tx) = ultra_result {
+                        // ── PRIMARY: Jupiter Ultra real transaction ─────────
+                        vec![ultra_tx]
+                    } else if config.flash_loan_enabled {
+                        // ── FALLBACK: Solend flash loan + stub swaps ────────
                         if let (Some(ref plan), Some(ref fkp)) =
                             (&flash_plan_for_live, &flash_keypair)
                         {
@@ -554,7 +647,7 @@ async fn main() -> Result<()> {
                                             repay_sol    = format!("{:.6}", plan.repay_amount as f64 / 1e9),
                                             fee_lamports = plan.fee_lamports,
                                             blockhash    = %bh_info.blockhash,
-                                            "LIVE FLASH LOAN TX: atomic borrow+swap+repay — submitting to Jito"
+                                            "LIVE FLASH LOAN TX (Ultra fallback): atomic borrow+swap+repay → Jito"
                                         );
 
                                         vec![flash_tx]

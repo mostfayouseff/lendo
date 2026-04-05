@@ -10,3 +10,7 @@
 # Mac / Linux junk
 .DS_Store
 
+.json
+
+.log
+.out

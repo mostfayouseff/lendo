@@ -1,0 +1,97 @@
+You are a senior Solana/Rust MEV engineer.
+
+Your mission: Upgrade an existing MEV bot to run live on Solana (Devnet or Mainnet) using real Jupiter APIs. Remove all mocks or simulated data. The bot must execute real transactions, read wallet balances correctly, and handle flash loans/arbitrage atomically.
+
+1️⃣ HARD REQUIREMENTS
+❌ No mock data
+❌ No simulated transactions
+❌ No placeholder routes
+✅ Only live API calls
+✅ Executable on-chain transactions
+✅ Wallet balance reading must be correct (Devnet/Mainnet)
+2️⃣ Verified Live Jupiter APIs
+Ultra Quote API – get route + transaction:
+GET https://api.jup.ag/ultra/v1/order?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&taker=27mnFgBVzcP35qjk2aDbLaygKQx4nLZtbB44Nhggrdsf
+Headers:
+  accept: application/json
+  x-api-key: 3a151309-ead7-4a6a-836f-4a142e1467ac
+Token Price API – fetch prices for profit calculation:
+GET https://api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+Headers:
+  accept: application/json
+  x-api-key: 3a151309-ead7-4a6a-836f-4a142e1467ac
+Token Metadata API – symbol ↔ mint mapping:
+GET https://api.jup.ag/tokens/v2/search?query=SOL
+Headers:
+  accept: application/json
+  x-api-key: 3a151309-ead7-4a6a-836f-4a142e1467ac
+
+✅ These endpoints are confirmed working. Replace all old/mocked endpoints with them.
+
+3️⃣ Tasks for AI – Upgrade & Fix
+Ultra Quote Integration
+Fetch route + outAmount + fees + priceImpact + transaction (Base64)
+Use transaction directly after signing keypair
+Only fallback to legacy quote API if necessary
+Token Prices
+Fetch prices for profitability check
+Calculate slippage & expected profit
+Reject unprofitable trades
+Token Metadata
+Build mapping: symbol → mint
+Handle decimals correctly
+Validate all tokens
+Wallet Balance Fix
+Fix bug where wallet balance shows zero despite funds
+Check RPC connection, keypair reading, token accounts
+Ensure bot reads all token balances correctly
+Flash Loan + Swap Execution
+Combine Ultra Quote transaction + flash loans
+Validate fees, priceImpact, slippage, expected profit
+Execute atomically
+Rust Code Refactor
+Replace all hardcoded routes, mocks, fake tx
+Create structs matching Ultra Quote, Price API, Token Metadata JSON
+Implement core function:
+fn get_best_route_and_transaction(...) -> Result<RouteExecutionData>
+
+Returns:
+
+route
+expected output
+fees
+price impact
+serialized transaction
+Hot Loop / Live Trading
+Continuously fetch:
+Ultra Quote
+Token Prices
+Token Metadata (cached)
+Evaluate profit
+Execute transaction only if profitable and wallet balances correct
+Transaction Validity
+Check lastValidBlockHeight and blockhash freshness
+Retry if transaction fails
+Logging
+[TRADE]
+inputMint=
+outputMint=
+inAmount=
+outAmount=
+fees=
+priceImpact=
+expectedProfit=
+walletBalance=
+route=
+txSignature=
+4️⃣ Final Objective
+
+Deliver a MEV bot that:
+
+✅ Uses Jupiter Ultra APIs only
+✅ Executes real transactions on-chain
+✅ Reads wallet balances correctly
+✅ Detects real arbitrage opportunities
+✅ Runs continuously and reliably
+
+Any simulated data, mock route, or incorrect wallet reading must be removed and fixed.

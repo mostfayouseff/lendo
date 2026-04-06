@@ -48,7 +48,7 @@ use std::sync::Arc;
 use strategy::{ArbitrageStrategy, SolendFlashLoan};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use ingress::ShredEvent;
 
@@ -328,6 +328,17 @@ async fn main() -> Result<()> {
     let mut last_stats_report = std::time::Instant::now();
     const STATS_REPORT_INTERVAL_SECS: u64 = 60;
 
+    // ── Jito rate limiter + execution queue state ─────────────────────────────
+    // Jito block engine allows at most 1 bundle per second.
+    // After any bundle submission we enforce a 1200ms cooldown before the next.
+    let mut last_bundle_submit: Option<std::time::Instant> = None;
+    const JITO_COOLDOWN_MS: u64 = 1_200;
+
+    // Deduplication set — prevents sending the same arbitrage path twice.
+    // Bounded to 64 entries; cleared when full.
+    let mut submitted_path_hashes: std::collections::HashSet<u64> =
+        std::collections::HashSet::new();
+
     // ── Hot loop ───────────────────────────────────────────────────────────────
     loop {
         // ── Absorb slot updates ────────────────────────────────────────────
@@ -408,7 +419,13 @@ async fn main() -> Result<()> {
             let n_approved = approved_trades.len();
             metrics.paths_profitable.inc_by(n_approved as f64);
 
-            for trade in approved_trades {
+            // ── Execution queue: pick only the BEST opportunity per cycle ─────
+            // Sending multiple bundles at once causes Jito 429 errors (1 req/sec limit).
+            // We select the highest expected-profit trade and drop the rest.
+            if let Some(trade) = approved_trades
+                .into_iter()
+                .max_by_key(|t| t.path.expected_profit_lamports)
+            {
                 let dex_path: String = trade
                     .path
                     .edges
@@ -416,6 +433,37 @@ async fn main() -> Result<()> {
                     .map(|e| format!("{}", e.dex))
                     .collect::<Vec<_>>()
                     .join(" → ");
+
+                // ── Jito rate limiter — enforce 1200ms cooldown between submissions
+                if let Some(last) = last_bundle_submit {
+                    let elapsed = last.elapsed();
+                    let cooldown = std::time::Duration::from_millis(JITO_COOLDOWN_MS);
+                    if elapsed < cooldown {
+                        warn!(
+                            remaining_ms = (cooldown - elapsed).as_millis(),
+                            path = %dex_path,
+                            "Jito rate limiter: cooldown active — dropping this cycle"
+                        );
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                }
+
+                // ── Deduplication — skip if the same path was recently submitted ──
+                let path_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    dex_path.hash(&mut h);
+                    h.finish()
+                };
+                if submitted_path_hashes.contains(&path_hash) {
+                    warn!(
+                        path = %dex_path,
+                        "Dedup: path already submitted this window — skipping"
+                    );
+                    tokio::task::yield_now().await;
+                    continue;
+                }
 
                 info!(
                     iteration,
@@ -427,7 +475,7 @@ async fn main() -> Result<()> {
                     source     = edge_source,
                     matrix_μs  = matrix_us,
                     rich_μs    = rich_us,
-                    "Arbitrage opportunity detected"
+                    "Arbitrage opportunity detected — best of cycle"
                 );
 
                 // ── Flash loan plan ────────────────────────────────────────
@@ -583,18 +631,28 @@ async fn main() -> Result<()> {
                                 .await
                                 {
                                     Ok(route_data) => {
-                                        info!(
-                                            input_mint   = %input_mint,
-                                            output_mint  = %output_mint,
-                                            in_amount    = route_data.in_amount,
-                                            out_amount   = route_data.out_amount,
-                                            impact_pct   = format!("{:.4}%", route_data.price_impact_pct),
-                                            tx_bytes     = route_data.transaction_bytes.len(),
-                                            route_hops   = route_data.route_plan.len(),
-                                            request_id   = %route_data.request_id,
-                                            "Ultra API: real swap transaction fetched — submitting to Jito"
-                                        );
-                                        Some(route_data.transaction_bytes)
+                                        // Guard: never use an empty transaction — fall back
+                                        if route_data.transaction_bytes.is_empty() {
+                                            warn!(
+                                                input_mint  = %input_mint,
+                                                output_mint = %output_mint,
+                                                "Ultra API returned zero-length transaction bytes — falling back to swap-instructions"
+                                            );
+                                            None
+                                        } else {
+                                            info!(
+                                                input_mint   = %input_mint,
+                                                output_mint  = %output_mint,
+                                                in_amount    = route_data.in_amount,
+                                                out_amount   = route_data.out_amount,
+                                                impact_pct   = format!("{:.4}%", route_data.price_impact_pct),
+                                                tx_bytes     = route_data.transaction_bytes.len(),
+                                                route_hops   = route_data.route_plan.len(),
+                                                request_id   = %route_data.request_id,
+                                                "Ultra API: real swap transaction fetched — submitting to Jito"
+                                            );
+                                            Some(route_data.transaction_bytes)
+                                        }
                                     }
                                     Err(e) => {
                                         warn!(
@@ -764,8 +822,16 @@ async fn main() -> Result<()> {
                             session_stats.record_trade(profit);
                             metrics.bundles_submitted.inc();
                             metrics.total_profit_lamports.add(profit as f64);
+                            // Only count accepted bundles against the circuit breaker
                             circuit_breaker.record_trade(profit).ok();
                             self_optimizer.record_trade(profit);
+
+                            // Update rate limiter and dedup state
+                            last_bundle_submit = Some(std::time::Instant::now());
+                            if submitted_path_hashes.len() >= 64 {
+                                submitted_path_hashes.clear();
+                            }
+                            submitted_path_hashes.insert(path_hash);
 
                             let record = make_record(
                                 iteration,
@@ -781,10 +847,15 @@ async fn main() -> Result<()> {
                             guard.commit();
                         }
                         Err(e) => {
-                            error!(error = %e, iter = iteration, "Bundle submission failed — retrying next cycle");
-                            circuit_breaker.record_trade(-1000).ok();
-                            pnl.add(-1000);
-                            session_stats.record_trade(-1000);
+                            // Bundle was NOT accepted by Jito (429, signing failure,
+                            // network error, etc.) — this is NOT a real trading loss.
+                            // Do NOT update circuit breaker, PnL, or session stats.
+                            // Only inform the optimizer so it can adapt parameters.
+                            warn!(
+                                error = %e,
+                                iter  = iteration,
+                                "Bundle submission failed — not counting as trading loss"
+                            );
                             self_optimizer.record_trade(-1000);
                         }
                     }

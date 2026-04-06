@@ -435,16 +435,30 @@ impl JitoBundleHandler {
         let max_swap_txs = MAX_BUNDLE_TXS.saturating_sub(1);
         let payloads: Vec<Vec<u8>> = payloads.into_iter().take(max_swap_txs).collect();
 
-        // Sign each swap payload
+        // Sign each swap payload.
+        // GUARD: never send an unsigned or empty transaction — skip it entirely.
         let mut signed_txs: Vec<String> = Vec::with_capacity(payloads.len() + 1);
         for mut payload in payloads {
+            if payload.is_empty() {
+                warn!("Skipping zero-length transaction payload — cannot sign empty bytes");
+                continue;
+            }
             match sign_transaction(&mut payload, keypair.as_ref()) {
                 Ok(()) => signed_txs.push(bs58::encode(&payload).into_string()),
                 Err(e) => {
-                    warn!("Signing failed: {e} — proceeding with unsigned payload");
-                    signed_txs.push(bs58::encode(&payload).into_string());
+                    warn!(
+                        error = %e,
+                        "Signing failed — skipping payload, will NOT send unsigned transaction"
+                    );
                 }
             }
+        }
+
+        // If signing failed for every payload, abort — never submit an empty/unsigned bundle.
+        if signed_txs.is_empty() {
+            return Err(JitoError::Signing(
+                "No transactions could be signed — aborting bundle submission".into(),
+            ));
         }
 
         // Build the tip transaction — LAST in bundle, per Jito spec

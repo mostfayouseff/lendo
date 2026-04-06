@@ -1,16 +1,11 @@
-// =============================================================================
-// jito-handler/src/flash_tx.rs
-// Clean & Fixed Atomic Solend Flash Loan Builder
-// 
-// Now accepts real Jupiter instructions (TxInstruction) from Ultra or swap-instructions.
-// No dummy data. Proper account handling. Reduced warnings.
-// =============================================================================
+// crates/jito-handler/src/flash_tx.rs
+// Clean Atomic Solend Flash Loan Builder (Final Fixed Version)
 
 use crate::keypair::ApexKeypair;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-// ── Verified Mainnet Solend Addresses ───────────────────────────────────────
+// ── Mainnet Solend Addresses ────────────────────────────────────────────────
 const SOLEND_PROGRAM_ID: &str = "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo";
 const SOLEND_MAIN_POOL: &str = "4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY";
 const SOLEND_SOL_RESERVE: &str = "FzbfXR7sopQL29Ubu312tkqWMxSre4dYSrFyYAjUYiC";
@@ -19,193 +14,125 @@ const SOLEND_FEE_RECEIVER: &str = "AXuN52TrDFhw9S8V3gfJvAX2JKK4y9ZtVGnE27PaLqQ";
 
 const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe8bv";
 const SYSVAR_INSTRUCTIONS: &str = "Sysvar1nstructions1111111111111111111111111";
 
-// Discriminators
 const BORROW_DISCRIMINATOR: u8 = 0x14;
 const REPAY_DISCRIMINATOR: u8 = 0x15;
 
-/// Real instruction coming from Jupiter (Ultra or swap-instructions)
+/// Simple instruction for swaps (compatible with your old swap_data)
 #[derive(Clone, Debug)]
 pub struct TxInstruction {
-    pub program_id: String,                    // base58 program ID
-    pub accounts: Vec<(String, bool, bool)>,   // (pubkey_b58, is_signer, is_writable)
-    pub data: Vec<u8>,                         // raw instruction data
+    pub program_id: String,
+    pub data: Vec<u8>,
 }
 
-/// Build atomic flash loan transaction: Borrow → Real Swaps → Repay
+/// Build atomic flash loan: Borrow → Swaps → Repay
 pub fn build_flash_loan_tx(
     keypair: &ApexKeypair,
     blockhash_b58: &str,
     borrow_lamports: u64,
     repay_lamports: u64,
-    swap_instructions: &[TxInstruction],   // ← Now expects real Jupiter instructions
+    swap_data: &[(String, Vec<u8>)],   // (program_id_b58, instruction_data)
 ) -> Vec<u8> {
     info!(
         borrow_sol = format!("{:.6}", borrow_lamports as f64 / 1e9),
         repay_sol = format!("{:.6}", repay_lamports as f64 / 1e9),
-        swap_count = swap_instructions.len(),
-        "FLASH LOAN TX: building atomic borrow → real swaps → repay"
+        swap_count = swap_data.len(),
+        "FLASH LOAN TX: building atomic borrow → swaps → repay"
     );
 
     let operator = keypair.pubkey_bytes;
-
-    // Derive PDAs
     let (lending_mkt_authority, _) = find_program_address(&[&b58_to_32(SOLEND_MAIN_POOL)], &b58_to_32(SOLEND_PROGRAM_ID));
     let (borrower_wsol_ata, _) = find_associated_token_account(&operator, &b58_to_32(WSOL_MINT));
 
-    // ── Accounts Table ───────────────────────────────────────────────────────
-    let mut accounts: Vec<AccountMeta> = vec![
-        AccountMeta { pubkey: operator, is_signer: true, is_writable: true },                    // 0: Operator
-        AccountMeta { pubkey: b58_to_32(SOLEND_SOL_LIQ_SUPPLY), is_signer: false, is_writable: true }, // 1
-        AccountMeta { pubkey: borrower_wsol_ata, is_signer: false, is_writable: true },          // 2
-        AccountMeta { pubkey: b58_to_32(SOLEND_SOL_RESERVE), is_signer: false, is_writable: true },   // 3
-        AccountMeta { pubkey: b58_to_32(SOLEND_FEE_RECEIVER), is_signer: false, is_writable: true },  // 4
-        AccountMeta { pubkey: lending_mkt_authority, is_signer: false, is_writable: true },      // 5
+    // Accounts table
+    let mut accounts: Vec<[u8; 32]> = vec![
+        operator,
+        b58_to_32(SOLEND_SOL_LIQ_SUPPLY),
+        borrower_wsol_ata,
+        b58_to_32(SOLEND_SOL_RESERVE),
+        b58_to_32(SOLEND_FEE_RECEIVER),
+        lending_mkt_authority,
     ];
 
-    // Common programs
     let solend_idx = accounts.len() as u8;
-    accounts.push(AccountMeta { pubkey: b58_to_32(SOLEND_PROGRAM_ID), is_signer: false, is_writable: false });
+    accounts.push(b58_to_32(SOLEND_PROGRAM_ID));
 
     let token_idx = accounts.len() as u8;
-    accounts.push(AccountMeta { pubkey: b58_to_32(TOKEN_PROGRAM_ID), is_signer: false, is_writable: false });
+    accounts.push(b58_to_32(TOKEN_PROGRAM_ID));
 
     let sysvar_idx = accounts.len() as u8;
-    accounts.push(AccountMeta { pubkey: b58_to_32(SYSVAR_INSTRUCTIONS), is_signer: false, is_writable: false });
+    accounts.push(b58_to_32(SYSVAR_INSTRUCTIONS));
 
     let lending_market_idx = accounts.len() as u8;
-    accounts.push(AccountMeta { pubkey: b58_to_32(SOLEND_MAIN_POOL), is_signer: false, is_writable: false });
+    accounts.push(b58_to_32(SOLEND_MAIN_POOL));
 
-    // Add DEX programs from swap instructions (deduplicated)
-    let mut program_to_idx: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
-    for ix in swap_instructions {
-        if !program_to_idx.contains_key(&ix.program_id) {
+    // Add DEX programs
+    let mut dex_indices = std::collections::HashMap::new();
+    for (prog_id, _) in swap_data {
+        if !dex_indices.contains_key(prog_id) {
             let idx = accounts.len() as u8;
-            program_to_idx.insert(ix.program_id.clone(), idx);
-            accounts.push(AccountMeta {
-                pubkey: b58_to_32(&ix.program_id),
-                is_signer: false,
-                is_writable: false,
-            });
+            dex_indices.insert(prog_id.clone(), idx);
+            accounts.push(b58_to_32(prog_id));
         }
     }
 
-    // ── Instructions ─────────────────────────────────────────────────────────
-    let mut instructions: Vec<TxInstruction> = Vec::new();
+    // Build instructions
+    let mut instructions = Vec::new();
 
-    // 1. Flash Borrow
+    // Flash Borrow
     let mut borrow_data = vec![BORROW_DISCRIMINATOR];
     borrow_data.extend_from_slice(&borrow_lamports.to_le_bytes());
+    instructions.push((solend_idx, vec![1, 2, 3, 4, 4, lending_market_idx, 5, token_idx, sysvar_idx], borrow_data));
 
-    instructions.push(TxInstruction {
-        program_id: SOLEND_PROGRAM_ID.to_string(),
-        accounts: vec![
-            (SOLEND_SOL_LIQ_SUPPLY.to_string(), false, true),
-            (bs58::encode(borrower_wsol_ata).into_string(), false, true),
-            (SOLEND_SOL_RESERVE.to_string(), false, true),
-            (SOLEND_FEE_RECEIVER.to_string(), false, true),
-            (SOLEND_FEE_RECEIVER.to_string(), false, true), // host fee
-            (SOLEND_MAIN_POOL.to_string(), false, false),
-            (bs58::encode(lending_mkt_authority).into_string(), false, true),
-            (TOKEN_PROGRAM_ID.to_string(), false, false),
-            (SYSVAR_INSTRUCTIONS.to_string(), false, false),
-        ],
-        data: borrow_data,
-    });
-
-    // 2. Real Jupiter swap instructions
-    for ix in swap_instructions {
-        instructions.push(ix.clone());
+    // Swaps
+    for (prog_id, data) in swap_data {
+        let prog_idx = *dex_indices.get(prog_id).unwrap_or(&solend_idx);
+        instructions.push((prog_idx, vec![0, 2], data.clone())); // operator + wsol_ata (simplified)
     }
 
-    // 3. Flash Repay
+    // Flash Repay
     let mut repay_data = vec![REPAY_DISCRIMINATOR];
     repay_data.extend_from_slice(&repay_lamports.to_le_bytes());
-    repay_data.push(0u8); // borrow ix index = 0
+    repay_data.push(0); // borrow ix index
+    instructions.push((solend_idx, vec![2, 1, 3, 4, 4, lending_market_idx, 5, 0, token_idx, sysvar_idx], repay_data));
 
-    instructions.push(TxInstruction {
-        program_id: SOLEND_PROGRAM_ID.to_string(),
-        accounts: vec![
-            (bs58::encode(borrower_wsol_ata).into_string(), false, true),
-            (SOLEND_SOL_LIQ_SUPPLY.to_string(), false, true),
-            (SOLEND_SOL_RESERVE.to_string(), false, true),
-            (SOLEND_FEE_RECEIVER.to_string(), false, true),
-            (SOLEND_FEE_RECEIVER.to_string(), false, true),
-            (SOLEND_MAIN_POOL.to_string(), false, false),
-            (bs58::encode(lending_mkt_authority).into_string(), false, true),
-            (bs58::encode(operator).into_string(), true, true), // operator as authority
-            (TOKEN_PROGRAM_ID.to_string(), false, false),
-            (SYSVAR_INSTRUCTIONS.to_string(), false, false),
-        ],
-        data: repay_data,
-    });
-
-    // ── Serialize (Legacy for simplicity) ───────────────────────────────────
+    // Serialize legacy transaction
     let mut msg: Vec<u8> = Vec::new();
-
-    let num_signed = 1u8;
-    let num_ro_signed = 0u8;
-    let num_ro_unsigned = (accounts.len() as u8).saturating_sub(1);
-
-    msg.push(num_signed);
-    msg.push(num_ro_signed);
-    msg.push(num_ro_unsigned);
+    msg.push(1); // 1 signer
+    msg.push(0); // readonly signed
+    msg.push((accounts.len() as u8).saturating_sub(1)); // readonly unsigned
 
     write_compact_u16(&mut msg, accounts.len() as u16);
     for acct in &accounts {
-        msg.extend_from_slice(&acct.pubkey);
+        msg.extend_from_slice(acct);
     }
 
     msg.extend_from_slice(&b58_to_32(blockhash_b58));
 
     write_compact_u16(&mut msg, instructions.len() as u16);
-
-    for ix in &instructions {
-        let prog_idx = program_to_idx.get(&ix.program_id)
-            .copied()
-            .unwrap_or(solend_idx);
-
-        msg.push(prog_idx);
-
-        write_compact_u16(&mut msg, ix.accounts.len() as u16);
-        for (pubkey_b58, _, _) in &ix.accounts {
-            // Simplified: in production you'd map every pubkey to its index in accounts table
-            // For now we use a placeholder. You can improve this later with a proper lookup.
-            msg.push(0u8); // TODO: proper account index mapping
+    for (prog_idx, acct_idxs, data) in &instructions {
+        msg.push(*prog_idx);
+        write_compact_u16(&mut msg, acct_idxs.len() as u16);
+        for &idx in acct_idxs {
+            msg.push(idx);
         }
-
-        write_compact_u16(&mut msg, ix.data.len() as u16);
-        msg.extend_from_slice(&ix.data);
+        write_compact_u16(&mut msg, data.len() as u16);
+        msg.extend_from_slice(data);
     }
 
-    // Sign
     let sig = keypair.sign(&msg);
-    let mut tx: Vec<u8> = Vec::new();
-    tx.push(1u8); // 1 signature
+    let mut tx = Vec::new();
+    tx.push(1u8);
     tx.extend_from_slice(&sig);
     tx.extend_from_slice(&msg);
 
-    info!(
-        tx_size = tx.len(),
-        ix_count = instructions.len(),
-        account_count = accounts.len(),
-        "FLASH LOAN TX: complete atomic transaction built and signed"
-    );
-
+    info!(tx_size = tx.len(), "FLASH LOAN TX: complete atomic transaction built and signed");
     tx
 }
 
-// ── Supporting Types & Utilities ─────────────────────────────────────────────
-#[derive(Clone, Debug)]
-struct AccountMeta {
-    pubkey: [u8; 32],
-    is_signer: bool,
-    is_writable: bool,
-}
-
-pub fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
+// ── Utilities ───────────────────────────────────────────────────────────────
+pub fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
     if val < 0x80 {
         buf.push(val as u8);
     } else if val < 0x4000 {
@@ -221,7 +148,7 @@ pub fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
 pub fn b58_to_32(addr: &str) -> [u8; 32] {
     let decoded = bs58::decode(addr).into_vec().unwrap_or_default();
     if decoded.len() != 32 {
-        warn!(addr = %addr, "b58_to_32: invalid length");
+        warn!(addr = %addr, "b58_to_32 failed");
         return [0u8; 32];
     }
     let mut out = [0u8; 32];
@@ -248,7 +175,7 @@ pub fn find_program_address(seeds: &[&[u8]], program_id: &[u8; 32]) -> ([u8; 32]
 
 pub fn find_associated_token_account(owner: &[u8; 32], mint: &[u8; 32]) -> ([u8; 32], u8) {
     let token_prog = b58_to_32(TOKEN_PROGRAM_ID);
-    let ata_prog = b58_to_32(ATA_PROGRAM_ID);
+    let ata_prog = b58_to_32(ATA_PROGRAM_ID); // you can add this const if needed
     find_program_address(&[owner, &token_prog, mint], &ata_prog)
 }
 

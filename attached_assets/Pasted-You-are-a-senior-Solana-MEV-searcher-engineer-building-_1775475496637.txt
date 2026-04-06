@@ -1,0 +1,244 @@
+You are a senior Solana MEV searcher engineer building a production-grade arbitrage execution engine.
+
+I already have a working MEV bot with:
+
+* Ultra API integration (for route + transaction)
+* Flash loans
+* Jito bundle submission
+* Deduplication + best-opportunity selection
+* Basic cooldown (1200ms)
+
+However, the bot fails under real network conditions due to:
+
+* Jito 429 rate limits (global congestion)
+* Static cooldown
+* Non-adaptive tipping
+* Single endpoint submission
+* No execution strategy awareness
+
+## GOAL
+
+Upgrade the bot into a **Searcher-Grade Execution Engine** that can survive and compete under real mainnet congestion.
+
+---
+
+## 🔴 CORE REQUIREMENTS
+
+### 1. Adaptive Cooldown Engine
+
+Replace static cooldown with dynamic system:
+
+* Track:
+
+  * last N submission results (success / 429 / failure)
+* Behavior:
+
+  * On 429 → exponentially increase cooldown
+  * On success → gradually decrease cooldown
+* Range:
+
+  * min: 300ms
+  * max: 5000ms
+
+Example:
+
+* success → cooldown *= 0.8
+* 429 → cooldown *= 1.5
+
+Include jitter (+/- 10%)
+
+---
+
+### 2. Dynamic Tip Strategy (CRITICAL)
+
+Tip must be competitive:
+
+* Base tip = % of expected profit
+* Start at: 30%
+* Increase if:
+
+  * repeated failures
+  * high congestion
+* Decrease if:
+
+  * consistent success
+
+Constraints:
+
+* min_tip: safe floor
+* max_tip: never exceed profit
+
+Also:
+
+* Track "tip efficiency" (accepted / tip ratio)
+
+---
+
+### 3. Multi-Endpoint Jito Submission
+
+Do NOT rely on single endpoint.
+
+Implement:
+
+* endpoint pool:
+
+  * mainnet.block-engine.jito.wtf
+  * (design system to allow adding more endpoints later)
+
+* Strategy:
+
+  * round-robin OR random selection
+  * retry on different endpoint if failure
+
+---
+
+### 4. Smart Execution Queue
+
+Instead of only 1 opportunity:
+
+* Keep top 3 opportunities:
+
+  * sorted by expected_profit
+* Execute:
+
+  * try #1
+  * if failed → try #2 (same cycle if still valid)
+  * if failed → abort cycle
+
+Each must pass:
+
+* Ultra route validation
+* profit threshold
+
+---
+
+### 5. Slot-Aware Timing (ADVANCED)
+
+Improve timing:
+
+* Track current slot via RPC
+* Estimate slot boundary
+* Submit bundle:
+
+  * slightly before next slot (e.g. last 100–200ms)
+
+Goal:
+
+* maximize inclusion probability
+
+---
+
+### 6. Dead Market Detection
+
+If:
+
+* N consecutive 429s OR
+* no successful bundle in X seconds
+
+Then:
+
+* Enter "cooldown mode":
+
+  * pause execution for 5–15 seconds
+  * slowly resume
+
+---
+
+### 7. Ultra Integration (STRICT)
+
+Ultra is the ONLY source of truth:
+
+* Use Ultra:
+
+  * for price discovery
+  * for execution
+* If Ultra fails:
+
+  * skip opportunity immediately
+* NEVER block waiting for prices
+
+---
+
+### 8. Strict Signing Enforcement
+
+* If transaction cannot be signed:
+
+  * DROP it completely
+* NEVER send unsigned bundles
+* Log structured error
+
+---
+
+### 9. Metrics + Observability
+
+Track:
+
+* total_opportunities
+* executed_trades
+* successful_bundles
+* failed_bundles
+* 429_count
+* avg_cooldown
+* avg_tip
+* profit_realized
+
+Expose via logs or Prometheus
+
+---
+
+### 10. Performance Constraints
+
+* Fully async (tokio)
+* No blocking calls
+* No unwrap()
+* Use timeouts on all network calls (1–2s max)
+* Cache Ultra quotes (TTL ~500ms)
+
+---
+
+## 🧠 DESIGN PRINCIPLES
+
+* Execution > detection
+* Real price = executable route (Ultra)
+* Survive congestion, don’t fight it blindly
+* Minimize wasted bundle submissions
+* Adapt in real-time
+
+---
+
+## 📦 OUTPUT REQUIRED
+
+Provide:
+
+1. Rust module: `ExecutionEngine`
+2. Components:
+
+   * adaptive_cooldown.rs
+   * tip_strategy.rs
+   * jito_client.rs (multi-endpoint)
+   * execution_queue.rs
+3. Example integration in main loop
+4. Clear logging improvements
+
+---
+
+## ⚠️ IMPORTANT
+
+This is NOT a toy bot.
+
+Design like:
+
+* a real MEV searcher
+* competing against professional bots
+
+Focus on:
+
+* resilience
+* adaptability
+* execution success rate
+
+Avoid:
+
+* naive loops
+* static configs
+* blocking behavior

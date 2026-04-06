@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
 const SWAP_INSTRUCTIONS_URL: &str = "https://api.jup.ag/swap/v1/swap-instructions";

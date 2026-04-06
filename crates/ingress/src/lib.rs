@@ -1,4 +1,6 @@
 // crates/ingress/src/lib.rs
+
+// Modules
 pub mod filter;
 pub mod helius_ws;
 pub mod jupiter;
@@ -20,8 +22,6 @@ pub use ultra::{
     build_ultra_client,
     get_best_route_and_transaction,
     RouteExecutionData,
-    RoutePlanStep,
-    SwapInfo,
     UltraOrderResponse,
 };
 pub use yellowstone::{MockYellowstoneStream, SlotUpdate};

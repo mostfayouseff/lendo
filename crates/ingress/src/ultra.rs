@@ -1,5 +1,5 @@
 // crates/ingress/src/ultra.rs
-// Jupiter Ultra / Swap V2 — Fixed type inference + clean imports
+// Jupiter Ultra / Swap V2 — Fixed borrow/move issues + clean imports
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -65,13 +65,18 @@ pub async fn get_best_route_and_transaction(
         req = req.header("x-api-key", key);
     }
 
+    // Send request and get text first to avoid move errors
     let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("Ultra HTTP {}: {}", resp.status(), text));
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("Ultra HTTP {}: {}", status, text));
     }
 
-    let raw: UltraOrderResponse = resp.json().await?;
+    // Parse JSON from text
+    let raw: UltraOrderResponse = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Ultra response: {}", e))?;
 
     let transaction_b64 = raw.transaction
         .filter(|s| !s.trim().is_empty())

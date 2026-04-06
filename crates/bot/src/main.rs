@@ -647,7 +647,7 @@ async fn main() -> Result<()> {
                                                 out_amount   = route_data.out_amount,
                                                 impact_pct   = format!("{:.4}%", route_data.price_impact_pct),
                                                 tx_bytes     = route_data.transaction_bytes.len(),
-                                                route_hops   = route_data.route_plan.len(),
+                                                // route_hops = route_data.route_plan.len(), // removed because field doesn't exist in this commit
                                                 request_id   = %route_data.request_id,
                                                 "Ultra API: real swap transaction fetched — submitting to Jito"
                                             );

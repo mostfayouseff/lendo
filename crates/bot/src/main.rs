@@ -774,13 +774,16 @@ async fn main() -> Result<()> {
                                                 })
                                                 .collect();
 
-                                            let flash_tx = build_flash_loan_tx(
-                                                fkp,
-                                                &bh_info.blockhash,
-                                                plan.borrow_amount,
-                                                plan.repay_amount,
-                                                &real_swap_instructions,
-                                            );
+                                                let flash_tx = build_flash_loan_tx(
+                                                    fkp,
+                                                    &bh_info.blockhash,
+                                                    plan.borrow_amount,
+                                                    plan.repay_amount,
+                                                    &trade.instructions.iter().map(|instr| {
+                                                        // Convert your internal instruction to TxInstruction
+                                                        ( "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4".to_string(), instr.data.clone() )
+                                                    }).collect::<Vec<_>>(),
+                                                );
 
                                             info!(
                                                 tx_bytes     = flash_tx.len(),

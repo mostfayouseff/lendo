@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
 const SWAP_INSTRUCTIONS_URL: &str = "https://api.jup.ag/swap/v1/swap-instructions";
@@ -131,7 +131,6 @@ pub async fn build_signed_swap_transaction(
     all_instructions.extend(swap_ix_resp.setup_instructions);
     all_instructions.push(swap_ix_resp.swap_instruction);
 
-    // Jito tip
     let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
     all_instructions.push(tip_ix);
 

@@ -779,7 +779,7 @@ async fn main() -> Result<()> {
                                                 &bh_info.blockhash,
                                                 plan.borrow_amount,
                                                 plan.repay_amount,
-                                                &swap_data,
+                                                &real_swap_instructions,
                                             );
 
                                             info!(

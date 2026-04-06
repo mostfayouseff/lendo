@@ -1,11 +1,5 @@
-// =============================================================================
+// crates/ingress/src/lib.rs
 // INGRESS CRATE — Live data ingress from Helius, Alchemy, and Jupiter
-//
-// PRIMARY stream:   Helius WebSocket (transactionSubscribe + logsSubscribe)
-// FALLBACK stream:  Alchemy WebSocket (logsSubscribe)
-// PRICE feed:       Multi-source Jupiter price monitor (self-healing)
-// SWAP EXECUTION:   Jupiter /v6/swap-instructions → real v0 VersionedTransaction
-// =============================================================================
 
 pub mod filter;
 pub mod helius_ws;
@@ -15,20 +9,38 @@ pub mod swap_builder;
 pub mod ultra;
 pub mod yellowstone;
 
+// Public re-exports
 pub use filter::{EbpfFilter, FilterRule};
 pub use helius_ws::{AlchemyTransactionStream, HeliusTransactionStream, DEX_PROGRAMS};
-pub use jupiter::{build_token_info_map, JupiterMonitor, KnownToken, TokenInfo, TOKENS};
 pub use shredstream::{MockShredStream, ShredEvent};
 pub use swap_builder::{
-    build_signed_swap_transaction, build_swap_client, BuiltSwapTransaction,
-    JupiterAccountMeta, JupiterInstruction, QuoteResponse, SwapInstructionsResponse,
+    build_signed_swap_transaction,
+    build_swap_client,
+    BuiltSwapTransaction,
+    // Internal types - only re-export if other crates really need them
+    // JupiterAccountMeta, JupiterInstruction, QuoteResponse, SwapInstructionsResponse,
 };
 pub use ultra::{
-    build_ultra_client, get_best_route_and_transaction, RouteExecutionData, RoutePlanStep,
-    SwapInfo, TokenMetadata, UltraOrderResponse,
+    build_ultra_client,
+    get_best_route_and_transaction,
+    RouteExecutionData,
+    RoutePlanStep,
+    SwapInfo,
+    TokenMetadata,
+    UltraOrderResponse,
 };
 pub use yellowstone::{MockYellowstoneStream, SlotUpdate};
 
+// Jupiter price monitor exports (fixed)
+pub use jupiter::{
+    JupiterMonitor,
+    build_token_info_map,
+    KnownToken,
+    TokenInfo,
+    TOKENS,           // now properly exported
+};
+
+// Error type
 use thiserror::Error;
 
 #[derive(Debug, Error)]

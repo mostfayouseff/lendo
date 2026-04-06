@@ -1,0 +1,87 @@
+You are a senior software engineer and debugging expert.
+
+I want you to FULLY analyze, FIX, and IMPROVE my trading bot/system. Do not just explain — directly MODIFY the code where needed.
+
+The system currently has critical issues:
+
+* Extremely slow performance
+* Not reading wallet/balance correctly
+* Not executing any trades at all
+
+Your responsibilities:
+
+1. **Deep Analysis**
+
+* Scan the entire codebase.
+* Identify ALL bugs, bottlenecks, broken logic, and unused code.
+
+2. **Remove ALL Mocks (CRITICAL)**
+
+* Find any mock data, fake responses, simulated trades, or placeholder logic.
+* REMOVE them completely.
+* Replace them with REAL, working integrations (actual API calls, real data handling).
+* Ensure the system interacts with real wallet balances and real market data.
+
+3. **Direct Code Fixing (VERY IMPORTANT)**
+
+* Automatically MODIFY the code to fix issues.
+* Do NOT just suggest changes — APPLY them.
+* Rewrite broken functions if necessary.
+
+4. **Performance Optimization**
+
+* Fix slowness issues (async handling, loops, API calls, etc.).
+* Optimize execution speed and responsiveness.
+
+5. **Wallet Issue Fix**
+
+* Fix wallet/balance fetching logic.
+* Ensure API calls are correct, authenticated, and returning valid data.
+* Add validation, retries, and fallback handling.
+
+6. **Trading Execution Fix**
+
+* Fix why trades are not being executed.
+* Ensure:
+
+  * Signals are generated correctly
+  * Conditions are reachable
+  * Orders are actually sent to the API
+* Confirm successful order execution via API response.
+
+7. **Logging & Visibility**
+
+* Add detailed logs for:
+
+  * Wallet fetching
+  * Signal generation
+  * Trade execution
+  * API responses
+  * Errors
+* Make debugging easy and transparent.
+
+8. **Error Handling**
+
+* Add proper try/catch (or equivalent) for all external calls.
+* Prevent silent failures completely.
+
+9. **Final Output (IMPORTANT)**
+   After fixing:
+
+* Show the FULL updated code (not partial).
+* Clearly explain:
+
+  * What was broken
+  * What you changed
+  * Where mocks were removed and replaced
+  * Why trades were not executing
+
+10. **Validation Step**
+
+* Simulate or walk through a full real trade cycle using actual logic.
+* Confirm the bot is now working correctly end-to-end.
+
+Goal:
+Make the bot fully functional, fast, connected to real data, and executing real trades successfully.
+
+DO NOT leave any mock, fake data, or placeholder logic in the system.

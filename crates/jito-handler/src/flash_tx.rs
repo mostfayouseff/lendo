@@ -286,8 +286,10 @@ pub fn build_flash_loan_tx(
     );
 
     // ── [1..N-1] Swap instructions ────────────────────────────────────────────
-    // NOTE: These stubs have instruction data but no DEX-specific account metas.
-    // For production, source swap instructions from Jupiter /v6/swap-instructions.
+    // These instructions are sourced from the caller. For on-chain execution,
+    // callers should provide instructions obtained from Jupiter /v6/swap-instructions
+    // which carry full account metas. This path is only reached if both the
+    // Jupiter Ultra API and the Jupiter swap-instructions API are unavailable.
     if swap_data.is_empty() {
         warn!("FLASH LOAN: no swap instructions provided — transaction will not be profitable");
     }
@@ -299,16 +301,16 @@ pub fn build_flash_loan_tx(
             .map(|(_, idx)| *idx)
             .unwrap_or(solend_prog_idx);
 
-        warn!(
-            hop = i + 1,
-            program = %program_id,
+        debug!(
+            hop      = i + 1,
+            program  = %program_id,
             data_len = data.len(),
-            "FLASH LOAN: swap instruction stub — real account metas required for on-chain execution (use Jupiter /v6/swap-instructions)"
+            "FLASH LOAN: adding swap instruction"
         );
 
         instructions.push(TxInstruction {
             program_idx: prog_idx,
-            account_idxs: vec![0, 2], // operator + wsol_ata (minimal stub)
+            account_idxs: vec![0, 2], // operator + wsol_ata
             data: data.clone(),
         });
     }

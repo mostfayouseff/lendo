@@ -1,0 +1,176 @@
+You are working on a Rust-based Solana MEV arbitrage bot.
+
+🚨 CRITICAL TASK: REMOVE ALL MOCKS AND IMPLEMENT REAL SWAP EXECUTION USING JUPITER `/swap/v2/build`
+
+The system is currently broken because:
+
+* It uses fake swap instructions (stubs)
+* It calculates arbitrage using USD prices instead of real execution
+* No real swaps are being executed
+* Jito bundles fail or transactions are invalid
+
+Your job is to FIX the execution layer completely.
+
+---
+
+# 🎯 GOALS
+
+1. ❌ REMOVE ALL MOCK / STUB CODE
+
+   * Delete any function like:
+
+     * build_swap_stub
+     * fake_swap
+     * dummy_instruction
+   * No placeholders allowed
+   * Everything must be real, working code
+
+---
+
+# 🧠 IMPLEMENT REAL JUPITER SWAP FLOW
+
+## Step 1: Call Jupiter `/swap/v2/build`
+
+Make an HTTP GET request:
+
+https://api.jup.ag/swap/v2/build
+
+With params:
+
+* inputMint
+* outputMint
+* amount (in smallest units)
+* taker (wallet pubkey)
+* slippageBps
+
+Add header:
+
+* x-api-key: JUPITER_API_KEY (if available)
+
+---
+
+## Step 2: Parse response
+
+Create Rust structs for:
+
+* setupInstructions
+* swapInstruction
+* cleanupInstruction
+* computeBudgetInstructions
+* otherInstructions
+* addressesByLookupTableAddress
+* blockhashWithMetadata
+
+Each instruction must be converted into:
+solana_sdk::instruction::Instruction
+
+---
+
+## Step 3: Convert API instructions → real instructions
+
+Map:
+
+* programId → Pubkey
+* accounts → AccountMeta
+* data (base64) → Vec<u8>
+
+NO MOCKS. REAL CONVERSION ONLY.
+
+---
+
+## Step 4: Build transaction
+
+Transaction order MUST be:
+
+1. ComputeBudget instructions (including unit price)
+2. setupInstructions
+3. swapInstruction
+4. ADD JITO TIP INSTRUCTION (IMPORTANT)
+5. cleanupInstruction (if exists)
+6. otherInstructions
+
+---
+
+## Step 5: Add Jito tip (MANDATORY)
+
+Add a real transfer instruction:
+
+* from: payer
+* to: tip account
+* lamports: small tip (e.g. 5000–10000)
+
+The tip account MUST be:
+
+* included in the transaction
+* writable
+
+This fixes:
+"Bundles must write lock at least one tip account"
+
+---
+
+## Step 6: Build VersionedTransaction (v0)
+
+* Use Address Lookup Tables from response
+* Use blockhash from response
+* Set payer correctly
+
+---
+
+## Step 7: SIGN transaction
+
+* Load keypair from APEX_KEYPAIR_PATH
+* Sign transaction properly
+
+---
+
+## Step 8: SEND transaction
+
+* Either:
+
+  * send via RPC
+  * OR send via Jito bundle
+
+Transaction MUST be valid and executable on-chain
+
+---
+
+# ⚠️ IMPORTANT RULES
+
+* DO NOT simulate fake swaps
+* DO NOT use USD price arbitrage for execution
+* DO NOT keep any placeholder logic
+* DO NOT return dummy instructions
+
+Everything must be REAL and EXECUTABLE
+
+---
+
+# 🔧 OPTIONAL IMPROVEMENTS (IF TIME)
+
+* Add rate limiting (1 request/sec for Jupiter Basic plan)
+* Cache quotes to reduce API usage
+* Log full transaction before sending
+
+---
+
+# ✅ EXPECTED RESULT
+
+After implementation:
+
+* Bot generates REAL swap transactions
+* No more "swap instruction stub"
+* Jito bundles stop failing due to missing tip
+* Transactions are valid on-chain
+* System is ready for real arbitrage execution
+
+---
+
+Now:
+
+1. Search the entire codebase for mock/stub swap logic
+2. Replace it with Jupiter `/build` implementation
+3. Ensure everything compiles
+4. Ensure transactions are valid
+
+DO NOT leave any incomplete parts.

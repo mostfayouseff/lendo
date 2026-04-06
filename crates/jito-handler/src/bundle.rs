@@ -501,7 +501,7 @@ impl JitoBundleHandler {
 
 /// Select one of the 8 Jito tip accounts at random.
 /// Per Jito spec: random selection reduces contention across competing searchers.
-fn select_random_tip_account() -> String {
+pub fn select_random_tip_account() -> String {
     let mut rng = rand::thread_rng();
     JITO_TIP_ACCOUNTS
         .choose(&mut rng)

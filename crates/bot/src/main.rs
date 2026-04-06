@@ -32,10 +32,14 @@ use anyhow::{Context, Result};
 use common::{ApexConfig, ApexMetrics};
 use apex_core::MatrixBuilder;
 use ingress::{
-    build_ultra_client, get_best_route_and_transaction, AlchemyTransactionStream,
-    HeliusTransactionStream, JupiterMonitor, MockShredStream, MockYellowstoneStream,
+    build_signed_swap_transaction, build_swap_client, build_ultra_client,
+    get_best_route_and_transaction, AlchemyTransactionStream, HeliusTransactionStream,
+    JupiterMonitor, MockShredStream, MockYellowstoneStream,
 };
-use jito_handler::{build_flash_loan_tx, ApexKeypair, JitoBundleHandler, SolanaRpcClient};
+use jito_handler::{
+    build_flash_loan_tx, select_random_tip_account, ApexKeypair, JitoBundleHandler,
+    SolanaRpcClient, TipCalculator,
+};
 use pnl::{make_record, AtomicPnL, SessionStats};
 use risk_oracle::{AnomalyDetector, CircuitBreaker, SelfOptimizer, TradingParams};
 use safety::{AtomicRevertGuard, PreSimulator};
@@ -238,14 +242,19 @@ async fn main() -> Result<()> {
         .context("Failed to initialise live Jito handler")?
     };
 
-    // ── Jupiter Ultra API client ───────────────────────────────────────────────
-    // Used in the hot loop to fetch real executable transactions for each arb hop.
+    // ── Jupiter API clients ────────────────────────────────────────────────────
+    // ultra_client  — /ultra/v1/order (PRIMARY: complete pre-built transaction)
+    // swap_client   — /v6/quote + /v6/swap-instructions (SECONDARY: individual instructions)
     let ultra_client = build_ultra_client()
         .context("Failed to build Jupiter Ultra HTTP client")?;
+    let swap_client = build_swap_client()
+        .context("Failed to build Jupiter swap-instructions HTTP client")?;
+    let tip_calculator = TipCalculator::new();
     info!(
-        endpoint = "https://api.jup.ag/ultra/v1/order",
-        has_key  = config.jupiter_api_key.is_some(),
-        "Jupiter Ultra API client ready — will fetch real swap transactions per arb"
+        endpoint_ultra = "https://api.jup.ag/ultra/v1/order",
+        endpoint_swap  = "https://api.jup.ag/v6/swap-instructions",
+        has_key        = config.jupiter_api_key.is_some(),
+        "Jupiter API clients ready — Ultra (primary) + swap-instructions (secondary)"
     );
 
     // ── Ingress streams ────────────────────────────────────────────────────────
@@ -532,12 +541,13 @@ async fn main() -> Result<()> {
                 } else {
                     // ── LIVE TRADING: build + sign + submit to Jito ────────
                     //
-                    // Step 1: Try Jupiter Ultra API for a real executable swap tx.
-                    //         Ultra returns a complete versioned transaction with proper
-                    //         account metas — far superior to stub flash swap instructions.
-                    //
-                    // Step 2: If Ultra succeeds and is profitable → submit Ultra tx directly.
-                    //         If Ultra fails → fall back to Solend flash loan + stub swaps.
+                    // Execution priority:
+                    //   1. Jupiter Ultra API (/ultra/v1/order)
+                    //      Complete pre-built v0 transaction.
+                    //   2. Jupiter swap-instructions (/v6/quote + /v6/swap-instructions)
+                    //      Individual instructions assembled into a real v0 transaction
+                    //      with embedded Jito tip (satisfies Jito tip account write-lock).
+                    //   3. Solend flash loan (atomic borrow+repay wrapper — last resort).
 
                     let operator_pubkey: String = flash_keypair
                         .as_ref()
@@ -606,68 +616,145 @@ async fn main() -> Result<()> {
                         None
                     };
 
+                    // ── Compute tip for embedded Jito tip instruction ──────
+                    let swap_tip_lamports = tip_calculator
+                        .compute_tip(sim_result.expected_profit_lamports)
+                        .unwrap_or(10_000);
+                    let jito_tip_account = select_random_tip_account();
+
+                    // ── Build execution path ───────────────────────────────
+                    //
+                    // Priority chain for transaction construction:
+                    //   1. Jupiter Ultra API (/ultra/v1/order)
+                    //      Returns a complete pre-built v0 transaction.
+                    //   2. Jupiter swap-instructions (/v6/quote + /v6/swap-instructions)
+                    //      Returns individual instructions with full account metas;
+                    //      we assemble a real v0 transaction with embedded Jito tip.
+                    //   3. Solend flash loan (last resort — wraps whatever swap data
+                    //      is available in an atomic borrow+repay transaction).
+                    //   If none succeed → skip this trade (never send invalid bytes).
+
                     let payloads: Vec<Vec<u8>> = if let Some(ultra_tx) = ultra_result {
-                        // ── PRIMARY: Jupiter Ultra real transaction ─────────
+                        // ── PATH 1: Jupiter Ultra — complete pre-built transaction
                         vec![ultra_tx]
-                    } else if config.flash_loan_enabled {
-                        // ── FALLBACK: Solend flash loan + stub swaps ────────
-                        if let (Some(ref plan), Some(ref fkp)) =
-                            (&flash_plan_for_live, &flash_keypair)
-                        {
-                            match SolanaRpcClient::new(&config.http_rpc_url).ok() {
-                                Some(rpc) => match rpc.get_latest_blockhash().await {
-                                    Ok(bh_info) => {
-                                        let swap_data: Vec<(String, Vec<u8>)> = trade
-                                            .instructions
-                                            .iter()
-                                            .zip(trade.path.edges.iter())
-                                            .map(|(instr, edge)| {
-                                                let prog = match edge.dex {
-                                                    common::types::Dex::Raydium  => "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
-                                                    common::types::Dex::Orca     => "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3sFjJ37",
-                                                    common::types::Dex::Meteora  => "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
-                                                    common::types::Dex::Phoenix  => "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",
-                                                    _                            => "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-                                                };
-                                                (prog.to_string(), instr.data.clone())
-                                            })
-                                            .collect();
-
-                                        let flash_tx = build_flash_loan_tx(
-                                            fkp,
-                                            &bh_info.blockhash,
-                                            plan.borrow_amount,
-                                            plan.repay_amount,
-                                            &swap_data,
-                                        );
-
-                                        info!(
-                                            tx_bytes     = flash_tx.len(),
-                                            borrow_sol   = format!("{:.6}", plan.borrow_amount as f64 / 1e9),
-                                            repay_sol    = format!("{:.6}", plan.repay_amount as f64 / 1e9),
-                                            fee_lamports = plan.fee_lamports,
-                                            blockhash    = %bh_info.blockhash,
-                                            "LIVE FLASH LOAN TX (Ultra fallback): atomic borrow+swap+repay → Jito"
-                                        );
-
-                                        vec![flash_tx]
+                    } else {
+                        // ── PATH 2: Jupiter swap-instructions — real v0 transaction
+                        let swap_builder_result = if let Some(ref fkp) = flash_keypair {
+                            if let (Some(ref input_mint), Some(ref output_mint)) =
+                                (&ultra_input_mint, &ultra_output_mint)
+                            {
+                                if input_mint != output_mint {
+                                    let active_slippage = self_optimizer.params().slippage_bps;
+                                    let kp_arc = fkp.clone();
+                                    match build_signed_swap_transaction(
+                                        &swap_client,
+                                        input_mint,
+                                        output_mint,
+                                        trade.position_lamports,
+                                        &operator_pubkey,
+                                        &fkp.pubkey_bytes,
+                                        config.jupiter_api_key.as_deref(),
+                                        active_slippage,
+                                        swap_tip_lamports,
+                                        &jito_tip_account,
+                                        &|msg: &[u8]| kp_arc.sign(msg),
+                                    )
+                                    .await
+                                    {
+                                        Ok(built) => {
+                                            info!(
+                                                tx_bytes     = built.transaction_bytes.len(),
+                                                in_amount    = built.in_amount,
+                                                out_amount   = built.out_amount,
+                                                tip_lamports = built.jito_tip_lamports,
+                                                tip_account  = %jito_tip_account,
+                                                "Jupiter swap-instructions: real v0 tx built — submitting to Jito"
+                                            );
+                                            Some(built.transaction_bytes)
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                error = %e,
+                                                "Jupiter swap-instructions failed — trying flash loan fallback"
+                                            );
+                                            None
+                                        }
                                     }
-                                    Err(e) => {
-                                        warn!(error = %e, "Flash loan: blockhash fetch failed — using swap-only fallback");
-                                        trade.instructions.iter().map(|i| i.data.clone()).collect()
-                                    }
-                                },
-                                None => {
-                                    warn!("Flash loan: RPC init failed — using swap-only fallback");
-                                    trade.instructions.iter().map(|i| i.data.clone()).collect()
+                                } else {
+                                    None
                                 }
+                            } else {
+                                None
                             }
                         } else {
-                            warn!("Flash loan: no viable plan or keypair — using swap-only path");
-                            trade.instructions.iter().map(|i| i.data.clone()).collect()
+                            None
+                        };
+
+                        if let Some(swap_tx) = swap_builder_result {
+                            vec![swap_tx]
+                        } else if config.flash_loan_enabled {
+                            // ── PATH 3: Solend flash loan (last-resort atomic wrap) ──
+                            if let (Some(ref plan), Some(ref fkp)) =
+                                (&flash_plan_for_live, &flash_keypair)
+                            {
+                                match SolanaRpcClient::new(&config.http_rpc_url).ok() {
+                                    Some(rpc) => match rpc.get_latest_blockhash().await {
+                                        Ok(bh_info) => {
+                                            let swap_data: Vec<(String, Vec<u8>)> = trade
+                                                .instructions
+                                                .iter()
+                                                .zip(trade.path.edges.iter())
+                                                .map(|(instr, edge)| {
+                                                    let prog = match edge.dex {
+                                                        common::types::Dex::Raydium => "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+                                                        common::types::Dex::Orca    => "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3sFjJ37",
+                                                        common::types::Dex::Meteora => "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+                                                        common::types::Dex::Phoenix => "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",
+                                                        _                           => "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                                                    };
+                                                    (prog.to_string(), instr.data.clone())
+                                                })
+                                                .collect();
+
+                                            let flash_tx = build_flash_loan_tx(
+                                                fkp,
+                                                &bh_info.blockhash,
+                                                plan.borrow_amount,
+                                                plan.repay_amount,
+                                                &swap_data,
+                                            );
+
+                                            info!(
+                                                tx_bytes     = flash_tx.len(),
+                                                borrow_sol   = format!("{:.6}", plan.borrow_amount as f64 / 1e9),
+                                                repay_sol    = format!("{:.6}", plan.repay_amount as f64 / 1e9),
+                                                fee_lamports = plan.fee_lamports,
+                                                blockhash    = %bh_info.blockhash,
+                                                "FLASH LOAN TX (last-resort): atomic borrow+repay → Jito"
+                                            );
+                                            vec![flash_tx]
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, "Flash loan: blockhash fetch failed — skipping trade");
+                                            continue;
+                                        }
+                                    },
+                                    None => {
+                                        warn!("Flash loan: RPC init failed — skipping trade");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                warn!("Flash loan: no viable plan or keypair — skipping trade");
+                                continue;
+                            }
+                        } else {
+                            warn!(
+                                iteration,
+                                "No valid execution path (Ultra + swap-instructions both failed, flash loans disabled) — skipping trade"
+                            );
+                            continue;
                         }
-                    } else {
-                        trade.instructions.iter().map(|i| i.data.clone()).collect()
                     };
 
                     match jito.submit(payloads, sim_result.expected_profit_lamports).await {

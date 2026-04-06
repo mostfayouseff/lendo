@@ -17,7 +17,7 @@ pub mod keypair;
 pub mod rpc;
 pub mod tip_calculator;
 
-pub use bundle::{JitoBundle, JitoBundleHandler};
+pub use bundle::{JitoBundle, JitoBundleHandler, select_random_tip_account};
 pub use flash_tx::{build_flash_loan_tx, find_associated_token_account, find_program_address};
 pub use keypair::ApexKeypair;
 pub use rpc::SolanaRpcClient;

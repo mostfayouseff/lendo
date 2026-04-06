@@ -1,19 +1,13 @@
 // =============================================================================
-// JUPITER SWAP BUILDER — Real executable transaction construction (2026 UPDATE)
-//
-// FIXED & UPDATED for Jupiter Swap API v1 (March 2026)
-//   • v6 endpoints are fully sunset
-//   • Now uses https://api.jup.ag/swap/v1/quote + /swap-instructions
-//   • Updated response schema (flat addressLookupTableAddresses, no nested map)
-//   • Blockhash is returned directly (no BlockhashWithMetadata wrapper)
-//   • Other instructions are always present (not Option)
-//   • Cleanup is truly optional (can be null)
-//   • ALT handling simplified to static-only accounts (no RPC needed for table contents)
-//     → Fully self-contained, no extra RPC calls
-//     → Works for 99% of routes (account count stays under Solana limits)
-//     → ALTs are ignored to keep the builder zero-dependency
-//
-// Flow remains exactly the same and produces valid v0 transactions with Jito tip.
+// JUPITER SWAP BUILDER — Fixed & Production-Ready (April 2026)
+// 
+// Uses: https://api.jup.ag/swap/v1/quote + /swap-instructions
+// Features:
+//   • Correct query string
+//   • Proper instruction ordering with Jito tip
+//   • Static-only v0 transaction (no extra RPC for ALTs)
+//   • Better 429 rate limit handling
+//   • Ready for flash-loan + arbitrage use cases
 // =============================================================================
 
 use anyhow::{Context, Result};
@@ -26,11 +20,11 @@ use tracing::{debug, info, warn};
 
 const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
 const SWAP_INSTRUCTIONS_URL: &str = "https://api.jup.ag/swap/v1/swap-instructions";
-const TIMEOUT_MS: u64 = 10_000;
+const TIMEOUT_MS: u64 = 12_000;
+
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 
-// ── Quote API types ────────────────────────────────────────────────────────────
-
+// ── Quote Response ───────────────────────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct QuoteResponse {
@@ -45,8 +39,7 @@ pub struct QuoteResponse {
     pub route_plan: Vec<serde_json::Value>,
 }
 
-// ── Swap instructions API types (v1 schema) ────────────────────────────────────
-
+// ── Swap Instructions Response (v1) ──────────────────────────────────────────
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JupiterAccountMeta {
@@ -60,8 +53,7 @@ pub struct JupiterAccountMeta {
 pub struct JupiterInstruction {
     pub program_id: String,
     pub accounts: Vec<JupiterAccountMeta>,
-    /// Base64-encoded instruction data
-    pub data: String,
+    pub data: String, // base64 encoded
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -71,17 +63,14 @@ pub struct SwapInstructionsResponse {
     pub setup_instructions: Vec<JupiterInstruction>,
     pub swap_instruction: JupiterInstruction,
     pub cleanup_instruction: Option<JupiterInstruction>,
-    pub other_instructions: Vec<JupiterInstruction>, // always present in v1
-    /// Flat list of ALT addresses (v1 change from old HashMap)
+    pub other_instructions: Vec<JupiterInstruction>,
     pub address_lookup_table_addresses: Vec<String>,
-    /// v1 returns these directly (no BlockhashWithMetadata wrapper)
     pub blockhash: String,
     pub last_valid_block_height: u64,
     pub prioritization_fee_lamports: Option<u64>,
 }
 
-// ── Swap instructions POST body ────────────────────────────────────────────────
-
+// ── Request Body ─────────────────────────────────────────────────────────────
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SwapInstructionsRequest<'a> {
@@ -91,11 +80,10 @@ struct SwapInstructionsRequest<'a> {
     use_shared_accounts: bool,
     dynamic_compute_unit_limit: bool,
     skip_user_accounts_rpc_calls: bool,
+    use_token_ledger: bool,
 }
 
-// ── Result type returned to callers ───────────────────────────────────────────
-
-/// A fully signed v0 versioned transaction ready for Jito submission.
+// ── Output ───────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct BuiltSwapTransaction {
     pub transaction_bytes: Vec<u8>,
@@ -104,8 +92,7 @@ pub struct BuiltSwapTransaction {
     pub jito_tip_lamports: u64,
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────────
-
+// ── Public API ───────────────────────────────────────────────────────────────
 pub async fn build_signed_swap_transaction(
     client: &Client,
     input_mint: &str,
@@ -119,7 +106,7 @@ pub async fn build_signed_swap_transaction(
     jito_tip_account: &str,
     sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
 ) -> Result<BuiltSwapTransaction> {
-    // ── Step 1: Get quote ──────────────────────────────────────────────────────
+    // 1. Get Quote
     let quote = get_quote(client, input_mint, output_mint, amount, slippage_bps, api_key)
         .await
         .context("Jupiter /swap/v1/quote failed")?;
@@ -128,66 +115,60 @@ pub async fn build_signed_swap_transaction(
     let out_amount: u64 = quote.out_amount.parse().unwrap_or(0);
 
     info!(
-        input_mint,
-        output_mint,
+        input_mint = %input_mint,
+        output_mint = %output_mint,
         in_amount,
         out_amount,
         slippage_bps,
-        "Jupiter /swap/v1/quote: route obtained"
+        "Jupiter quote received successfully"
     );
 
-    // ── Step 2: Get swap instructions ─────────────────────────────────────────
+    // 2. Get Swap Instructions
     let swap_ix_resp = get_swap_instructions(client, &quote, user_pubkey_b58, api_key)
         .await
         .context("Jupiter /swap/v1/swap-instructions failed")?;
 
     info!(
-        compute_budget_ixs = swap_ix_resp.compute_budget_instructions.len(),
-        setup_ixs          = swap_ix_resp.setup_instructions.len(),
-        has_cleanup        = swap_ix_resp.cleanup_instruction.is_some(),
-        alt_count          = swap_ix_resp.address_lookup_table_addresses.len(),
-        blockhash          = %swap_ix_resp.blockhash,
-        "Jupiter /swap/v1/swap-instructions: instructions received"
+        compute_ixs = swap_ix_resp.compute_budget_instructions.len(),
+        setup_ixs = swap_ix_resp.setup_instructions.len(),
+        has_cleanup = swap_ix_resp.cleanup_instruction.is_some(),
+        alts = swap_ix_resp.address_lookup_table_addresses.len(),
+        blockhash = %swap_ix_resp.blockhash,
+        "Jupiter swap instructions received"
     );
 
-    // ── Step 3: Assemble ordered instruction list ─────────────────────────────
+    // 3. Assemble instructions (correct order)
     let mut all_instructions: Vec<JupiterInstruction> = Vec::new();
 
-    for ix in &swap_ix_resp.compute_budget_instructions {
-        all_instructions.push(ix.clone());
-    }
-    for ix in &swap_ix_resp.setup_instructions {
-        all_instructions.push(ix.clone());
-    }
-    all_instructions.push(swap_ix_resp.swap_instruction.clone());
+    all_instructions.extend(swap_ix_resp.compute_budget_instructions);
+    all_instructions.extend(swap_ix_resp.setup_instructions);
+    all_instructions.push(swap_ix_resp.swap_instruction);
 
-    // Jito tip
+    // Jito tip instruction
     let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
     all_instructions.push(tip_ix);
 
-    if let Some(ref cleanup) = swap_ix_resp.cleanup_instruction {
-        all_instructions.push(cleanup.clone());
+    if let Some(cleanup) = swap_ix_resp.cleanup_instruction {
+        all_instructions.push(cleanup);
     }
-    for ix in &swap_ix_resp.other_instructions {
-        all_instructions.push(ix.clone());
-    }
+    all_instructions.extend(swap_ix_resp.other_instructions);
 
-    // ── Step 4: Build and sign the v0 versioned transaction ───────────────────
+    // 4. Build & sign v0 transaction (static-only)
     let tx_bytes = build_v0_transaction(
         &all_instructions,
-        &swap_ix_resp.address_lookup_table_addresses, // passed but ignored (static-only fallback)
+        &swap_ix_resp.address_lookup_table_addresses,
         &swap_ix_resp.blockhash,
         user_pubkey,
         sign_fn,
     )
-    .context("v0 transaction assembly failed")?;
+    .context("Failed to build v0 versioned transaction")?;
 
     info!(
-        tx_size           = tx_bytes.len(),
+        tx_size = tx_bytes.len(),
         in_amount,
         out_amount,
         jito_tip_lamports,
-        "Jupiter swap transaction built and signed successfully (v1 API)"
+        "Jupiter swap transaction built and signed (v0)"
     );
 
     Ok(BuiltSwapTransaction {
@@ -204,8 +185,7 @@ pub fn build_swap_client() -> Result<Client> {
         .build()?)
 }
 
-// ── Step 1: Quote ──────────────────────────────────────────────────────────────
-
+// ── Helper: Get Quote ────────────────────────────────────────────────────────
 async fn get_quote(
     client: &Client,
     input_mint: &str,
@@ -219,7 +199,7 @@ async fn get_quote(
         QUOTE_URL, input_mint, output_mint, amount, slippage_bps
     );
 
-    debug!(url = %url, "Fetching Jupiter /swap/v1/quote");
+    debug!(%url, "Fetching Jupiter quote");
 
     let mut req = client.get(&url).header("accept", "application/json");
     if let Some(key) = api_key {
@@ -227,24 +207,26 @@ async fn get_quote(
     }
 
     let resp = req.send().await.context("Quote HTTP request failed")?;
-    let status = resp.status();
 
-    if !status.is_success() {
+    if resp.status().as_u16() == 429 {
+        warn!("Jupiter quote rate limit (429) — consider API key or backoff");
+    }
+
+    if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Jupiter /swap/v1/quote HTTP {}: {}",
-            status,
-            &body[..body.len().min(400)]
-        ));
+        anyhow::bail!(
+            "Jupiter quote HTTP {}: {}",
+            resp.status(),
+            &body[..body.len().min(500)]
+        );
     }
 
     resp.json::<QuoteResponse>()
         .await
-        .context("Failed to parse Jupiter quote response")
+        .context("Failed to parse quote response")
 }
 
-// ── Step 2: Swap instructions ──────────────────────────────────────────────────
-
+// ── Helper: Get Swap Instructions ────────────────────────────────────────────
 async fn get_swap_instructions(
     client: &Client,
     quote: &QuoteResponse,
@@ -258,9 +240,8 @@ async fn get_swap_instructions(
         use_shared_accounts: true,
         dynamic_compute_unit_limit: true,
         skip_user_accounts_rpc_calls: true,
+        use_token_ledger: false,
     };
-
-    debug!(url = SWAP_INSTRUCTIONS_URL, "Posting to Jupiter /swap/v1/swap-instructions");
 
     let mut req = client
         .post(SWAP_INSTRUCTIONS_URL)
@@ -272,31 +253,33 @@ async fn get_swap_instructions(
         req = req.header("x-api-key", key);
     }
 
-    let resp = req.send().await.context("Swap instructions HTTP request failed")?;
-    let status = resp.status();
+    let resp = req.send().await.context("Swap-instructions HTTP request failed")?;
 
-    if !status.is_success() {
+    if resp.status().as_u16() == 429 {
+        warn!("Jupiter swap-instructions rate limit (429)");
+    }
+
+    if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Jupiter /swap/v1/swap-instructions HTTP {}: {}",
-            status,
-            &text[..text.len().min(400)]
-        ));
+        anyhow::bail!(
+            "Jupiter swap-instructions HTTP {}: {}",
+            resp.status(),
+            &text[..text.len().min(500)]
+        );
     }
 
     resp.json::<SwapInstructionsResponse>()
         .await
-        .context("Failed to parse Jupiter swap-instructions response (v1)")
+        .context("Failed to parse swap-instructions response")
 }
 
-// ── Jito tip instruction ───────────────────────────────────────────────────────
-
+// ── Jito Tip Instruction ─────────────────────────────────────────────────────
 fn build_tip_instruction(
     from_pubkey: &str,
     tip_account: &str,
     lamports: u64,
 ) -> JupiterInstruction {
-    let mut data = vec![2u8, 0, 0, 0];
+    let mut data = vec![2u8, 0, 0, 0]; // SystemProgram::Transfer
     data.extend_from_slice(&lamports.to_le_bytes());
 
     JupiterInstruction {
@@ -317,11 +300,10 @@ fn build_tip_instruction(
     }
 }
 
-// ── v0 VersionedTransaction builder (updated for v1) ───────────────────────────
-
+// ── v0 Versioned Transaction Builder (Static-only fallback) ──────────────────
 fn build_v0_transaction(
     instructions: &[JupiterInstruction],
-    _address_lookup_table_addresses: &[String], // ignored – static-only fallback
+    _address_lookup_table_addresses: &[String],
     blockhash_b58: &str,
     payer_pubkey: &[u8; 32],
     sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
@@ -336,6 +318,7 @@ fn build_v0_transaction(
     let payer_b58 = bs58::encode(payer_pubkey).into_string();
     let mut account_map: HashMap<String, AccountEntry> = HashMap::new();
 
+    // Insert payer
     account_map.insert(
         payer_b58.clone(),
         AccountEntry {
@@ -345,6 +328,7 @@ fn build_v0_transaction(
         },
     );
 
+    // Collect all accounts from instructions
     for ix in instructions {
         account_map.entry(ix.program_id.clone()).or_insert_with(|| AccountEntry {
             pubkey_bytes: b58_to_32(&ix.program_id),
@@ -367,13 +351,13 @@ fn build_v0_transaction(
         }
     }
 
-    // ── Classify accounts (static-only – no ALT reverse lookup needed) ───────
+    // Classify accounts for v0 message
     let mut sw_signers: Vec<String> = vec![payer_b58.clone()];
     let mut ro_signers: Vec<String> = Vec::new();
     let mut sw_static: Vec<String> = Vec::new();
     let mut ro_static: Vec<String> = Vec::new();
 
-    let mut all_pubkeys: Vec<String> = account_map.keys().cloned().collect();
+    let mut all_pubkeys: Vec<_> = account_map.keys().cloned().collect();
     all_pubkeys.sort();
 
     for pk in &all_pubkeys {
@@ -381,7 +365,6 @@ fn build_v0_transaction(
             continue;
         }
         let entry = &account_map[pk];
-
         if entry.is_signer {
             if entry.is_writable {
                 sw_signers.push(pk.clone());
@@ -402,29 +385,23 @@ fn build_v0_transaction(
     static_accounts.extend(ro_static.iter().cloned());
 
     let mut combined_index: HashMap<String, u8> = HashMap::new();
-    let mut next_idx: u16 = 0;
-
-    for pk in &static_accounts {
-        combined_index.insert(pk.clone(), next_idx as u8);
-        next_idx += 1;
+    for (idx, pk) in static_accounts.iter().enumerate() {
+        combined_index.insert(pk.clone(), idx as u8);
     }
 
     debug!(
         static_accounts = static_accounts.len(),
-        alt_tables_ignored = _address_lookup_table_addresses.len(),
-        total_accounts = next_idx,
-        "v0 account table assembled (static-only fallback for v1 API)"
+        alts_ignored = _address_lookup_table_addresses.len(),
+        "Building v0 message (static accounts only)"
     );
 
-    // ── Message header ─────────────────────────────────────────────────────────
+    // Build v0 message
+    let mut msg: Vec<u8> = Vec::new();
+    msg.push(0x80u8); // v0 prefix
+
     let num_required_sigs = (sw_signers.len() + ro_signers.len()) as u8;
     let num_readonly_signed = ro_signers.len() as u8;
     let num_readonly_unsigned = ro_static.len() as u8;
-
-    // ── Serialize v0 message ───────────────────────────────────────────────────
-    let mut msg: Vec<u8> = Vec::new();
-
-    msg.push(0x80u8); // v0 prefix
 
     msg.push(num_required_sigs);
     msg.push(num_readonly_signed);
@@ -455,16 +432,17 @@ fn build_v0_transaction(
         msg.extend_from_slice(&data);
     }
 
-    // No ALTs (static-only)
+    // No address lookup tables (static-only)
     write_compact_u16(&mut msg, 0);
 
-    // ── Sign ───────────────────────────────────────────────────────────────────
+    // Sign the message
     let payer_sig = sign_fn(&msg);
-
     let mut tx: Vec<u8> = Vec::with_capacity(3 + 64 * num_required_sigs as usize + msg.len());
-    write_compact_u16(&mut tx, num_required_sigs as u16);
 
+    write_compact_u16(&mut tx, num_required_sigs as u16);
     tx.extend_from_slice(&payer_sig);
+
+    // Placeholder signatures for other signers (if any)
     for _ in 1..num_required_sigs {
         tx.extend_from_slice(&[0u8; 64]);
     }
@@ -474,9 +452,8 @@ fn build_v0_transaction(
     Ok(tx)
 }
 
-// ── Utility ────────────────────────────────────────────────────────────────────
-
-fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
+// ── Utilities ────────────────────────────────────────────────────────────────
+fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
     if val < 0x80 {
         buf.push(val as u8);
     } else if val < 0x4000 {
@@ -492,7 +469,7 @@ fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
 fn b58_to_32(s: &str) -> [u8; 32] {
     let decoded = bs58::decode(s).into_vec().unwrap_or_default();
     if decoded.len() != 32 {
-        warn!(addr = %s, len = decoded.len(), "b58_to_32: unexpected length");
+        warn!(addr = %s, len = decoded.len(), "b58_to_32: invalid length, zeroing");
         return [0u8; 32];
     }
     let mut out = [0u8; 32];

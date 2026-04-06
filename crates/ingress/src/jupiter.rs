@@ -1,7 +1,8 @@
 // crates/ingress/src/jupiter.rs
-// Jupiter Price Monitor - Fully Fixed (April 2026)
+// Jupiter Price Monitor - Fully Fixed + Rate Limit Robust (April 2026)
 
 use common::types::{Dex, MarketEdge, TokenMint};
+use rand;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -12,7 +13,7 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 const POLL_INTERVAL_MS: u64 = 10_000;
-const HTTP_TIMEOUT_MS: u64 = 10_000;
+const HTTP_TIMEOUT_MS: u64 = 12_000;
 const MAX_LOG_WEIGHT: f64 = 2.0;
 const MIN_LOG_WEIGHT: f64 = -2.0;
 const JUPITER_SLOT_SENTINEL: u64 = u64::MAX;
@@ -92,6 +93,7 @@ impl JupiterMonitor {
     async fn run(tx: mpsc::Sender<Vec<MarketEdge>>, api_key: Option<String>) {
         let client = Client::builder()
             .timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
+            .pool_max_idle_per_host(8)
             .build()
             .expect("Failed to build HTTP client");
 
@@ -143,7 +145,9 @@ impl JupiterMonitor {
                     active_source = Self::try_failover(&client, &active_source, &api_key, &mut price_cache, sol_mint, &tx).await;
 
                     if consecutive_failures > 3 {
-                        sleep(Duration::from_millis(backoff_ms)).await;
+                        let jitter = rand::random::<u64>() % 500;
+                        let delay = Duration::from_millis(backoff_ms + jitter);
+                        sleep(delay).await;
                         backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }

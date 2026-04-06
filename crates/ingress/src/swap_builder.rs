@@ -1,6 +1,5 @@
 // crates/ingress/src/swap_builder.rs
-// Jupiter Swap Builder — FIXED & UPDATED TO SWAP V2 (April 2026)
-// Uses https://api.jup.ag/swap/v2/build
+// Jupiter Swap Builder — FIXED FOR SWAP V2 (April 2026)
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
@@ -8,14 +7,14 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 const SWAP_V2_BUILD_URL: &str = "https://api.jup.ag/swap/v2/build";
 const TIMEOUT_MS: u64 = 12_000;
 
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 
-// ── Response Types for Swap V2 /build ───────────────────────────────────────
+// ── Response Types ──────────────────────────────────────────────────────────
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SwapBuildResponse {
@@ -47,7 +46,6 @@ pub struct SwapInstructionsData {
     pub last_valid_block_height: u64,
 }
 
-// Shared instruction types
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JupiterAccountMeta {
@@ -155,7 +153,7 @@ pub fn build_swap_client() -> Result<Client> {
         .build()?)
 }
 
-// ── Internal Helpers ────────────────────────────────────────────────────────
+// ── Internal ────────────────────────────────────────────────────────────────
 async fn get_swap_build(
     client: &Client,
     input_mint: &str,
@@ -179,7 +177,7 @@ async fn get_swap_build(
     let status = resp.status();
 
     if status.as_u16() == 429 {
-        warn!("Jupiter Swap V2 rate limit hit (429)");  // You can re-add `warn` import if desired
+        warn!("Jupiter Swap V2 rate limit hit (429)");
     }
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -211,7 +209,7 @@ fn build_tip_instruction(
     }
 }
 
-// ── Original v0 transaction builder (unchanged) ─────────────────────────────
+// Your original v0 builder (kept intact)
 fn build_v0_transaction(
     instructions: &[JupiterInstruction],
     _address_lookup_table_addresses: &[String],
@@ -353,7 +351,7 @@ fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
 fn b58_to_32(s: &str) -> [u8; 32] {
     let decoded = bs58::decode(s).into_vec().unwrap_or_default();
     if decoded.len() != 32 {
-        tracing::warn!(addr = %s, "b58_to_32: invalid length");
+        warn!(addr = %s, "b58_to_32: invalid length");
         return [0u8; 32];
     }
     let mut out = [0u8; 32];

@@ -1,6 +1,7 @@
 // crates/ingress/src/jupiter.rs
-// Price Monitor - Fixed exports + rate limit handling
+// Jupiter Price Monitor - Fully Fixed (April 2026)
 
+use common::types::{Dex, MarketEdge, TokenMint};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -193,9 +194,11 @@ impl JupiterMonitor {
         }
 
         let resp = req.send().await?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Jupiter v3 HTTP {}: {}", resp.status(), &text[..text.len().min(300)]));
+            return Err(anyhow::anyhow!("Jupiter v3 HTTP {}: {}", status, &text[..text.len().min(300)]));
         }
 
         let body = resp.text().await?;
@@ -230,8 +233,8 @@ impl JupiterMonitor {
         );
 
         let resp = client.get(&url).header("Accept", "application/json").send().await?;
-
         let status = resp.status();
+
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("CoinGecko HTTP {}: {}", status, &text[..text.len().min(200)]));
@@ -258,6 +261,7 @@ impl JupiterMonitor {
     }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
 fn mint_to_token_mint(mint: &str) -> TokenMint {
     let mut arr = [0u8; 32];
     if let Ok(b) = bs58::decode(mint).into_vec() {
@@ -294,12 +298,12 @@ fn build_edges_from_prices(
             let log_weight = Decimal::try_from(clamped).unwrap_or(Decimal::ZERO);
 
             let dexes = if i < 4 && j < 4 {
-                &[Dex::JupiterV6, Dex::Raydium, Dex::Orca, Dex::Meteora, Dex::Phoenix][..]
+                vec![Dex::JupiterV6, Dex::Raydium, Dex::Orca, Dex::Meteora, Dex::Phoenix]
             } else {
-                &[Dex::JupiterV6, Dex::Raydium][..]
+                vec![Dex::JupiterV6, Dex::Raydium]
             };
 
-            for &dex in dexes {
+            for dex in dexes {
                 edges.push(MarketEdge {
                     from: mint_to_token_mint(ta.mint),
                     to: mint_to_token_mint(tb.mint),

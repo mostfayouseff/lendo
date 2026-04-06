@@ -1,12 +1,16 @@
 // crates/ingress/src/swap_builder.rs
-// Jupiter Swap Builder — PRODUCTION SAFE (April 2026)
+// Jupiter Swap Builder — PRODUCTION SAFE + RATE LIMIT ROBUST (Updated April 2026)
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
+use once_cell::sync::Lazy;
+use rand;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -14,11 +18,14 @@ use tracing::{info, warn};
 // CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 const SWAP_V2_BUILD_URL: &str = "https://api.jup.ag/swap/v2/build";
-const TIMEOUT_MS: u64 = 12_000;
+const TIMEOUT_MS: u64 = 15_000;
 
-// 🔥 throttling (IMPORTANT)
-const REQUEST_DELAY_MS: u64 = 80;
-const MAX_RETRIES: u8 = 4;
+const MIN_JUPITER_DELAY_MS: u64 = 150;   // Increased for stability (Jupiter free tier ~1 RPS)
+const MAX_RETRIES: u8 = 5;
+
+// Global throttle to prevent burst requests
+static GLOBAL_JUPITER_THROTTLE: Lazy<Arc<Mutex<Instant>>> =
+    Lazy::new(|| Arc::new(Mutex::new(Instant::now())));
 
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 
@@ -100,10 +107,17 @@ pub async fn build_signed_swap_transaction(
     sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
 ) -> Result<BuiltSwapTransaction> {
 
-    // 🔥 global throttle
-    sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+    // Global throttle - prevents multiple calls in the same millisecond
+    {
+        let mut last = GLOBAL_JUPITER_THROTTLE.lock().await;
+        let elapsed = last.elapsed();
+        if elapsed < Duration::from_millis(MIN_JUPITER_DELAY_MS) {
+            sleep(Duration::from_millis(MIN_JUPITER_DELAY_MS) - elapsed).await;
+        }
+        *last = Instant::now();
+    }
 
-    let build_resp = get_swap_build(
+    let build_resp = get_swap_build_with_backoff(
         client,
         input_mint,
         output_mint,
@@ -133,7 +147,7 @@ pub async fn build_signed_swap_transaction(
     all_instructions.extend(build_resp.instructions.setup_instructions);
     all_instructions.push(build_resp.instructions.swap_instruction);
 
-    // 💰 Jito tip
+    // Jito tip
     let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
     all_instructions.push(tip_ix);
 
@@ -175,9 +189,9 @@ pub fn build_swap_client() -> Result<Client> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RATE-LIMIT SAFE REQUEST
+// IMPROVED RATE-LIMIT SAFE REQUEST (Exponential Backoff + Jitter)
 // ─────────────────────────────────────────────────────────────────────────────
-async fn get_swap_build(
+async fn get_swap_build_with_backoff(
     client: &Client,
     input_mint: &str,
     output_mint: &str,
@@ -192,7 +206,7 @@ async fn get_swap_build(
         SWAP_V2_BUILD_URL, input_mint, output_mint, amount, slippage_bps, user_public_key
     );
 
-    let mut attempt = 0;
+    let mut attempt = 0u8;
 
     loop {
         let mut req = client.get(&url).header("accept", "application/json");
@@ -201,34 +215,36 @@ async fn get_swap_build(
             req = req.header("x-api-key", key);
         }
 
-        let resp = req.send().await;
-
-        match resp {
+        match req.send().await {
             Ok(r) => {
                 let status = r.status();
 
                 if status.as_u16() == 429 {
                     attempt += 1;
+                    if attempt >= MAX_RETRIES {
+                        return Err(anyhow!("Jupiter rate limit exceeded after {} attempts", attempt));
+                    }
+
+                    let base_delay = 300u64 * (1u64 << (attempt - 1)); // 300ms → 600ms → 1.2s → 2.4s
+                    let jitter = rand::random::<u64>() % 400;
+                    let delay = Duration::from_millis(base_delay + jitter);
 
                     warn!(
                         attempt,
-                        "429 rate limit — retrying with backoff"
+                        delay_ms = %delay.as_millis(),
+                        "Jupiter 429 rate limit — retrying with backoff + jitter"
                     );
 
-                    if attempt >= MAX_RETRIES {
-                        return Err(anyhow!("Rate limit exceeded"));
-                    }
-
-                    sleep(Duration::from_millis(200 * attempt as u64)).await;
+                    sleep(delay).await;
                     continue;
                 }
 
                 if !status.is_success() {
                     let text = r.text().await.unwrap_or_default();
                     return Err(anyhow!(
-                        "HTTP {}: {}",
+                        "Jupiter HTTP {}: {}",
                         status,
-                        &text[..text.len().min(300)]
+                        &text[..text.len().min(400)]
                     ));
                 }
 
@@ -237,19 +253,17 @@ async fn get_swap_build(
 
             Err(e) => {
                 attempt += 1;
-
                 if attempt >= MAX_RETRIES {
-                    return Err(anyhow!("HTTP failed: {}", e));
+                    return Err(anyhow!("HTTP request failed: {}", e));
                 }
-
-                sleep(Duration::from_millis(150 * attempt as u64)).await;
+                sleep(Duration::from_millis(200 * attempt as u64)).await;
             }
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JITO TIP
+// JITO TIP (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 fn build_tip_instruction(
     from_pubkey: &str,
@@ -379,7 +393,7 @@ fn build_v0_transaction(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
+// HELPERS (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
     if val < 0x80 {

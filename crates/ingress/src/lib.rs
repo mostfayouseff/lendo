@@ -22,7 +22,6 @@ pub use ultra::{
     RouteExecutionData,
     RoutePlanStep,
     SwapInfo,
-    TokenMetadata,
     UltraOrderResponse,
 };
 pub use yellowstone::{MockYellowstoneStream, SlotUpdate};

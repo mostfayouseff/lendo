@@ -1,14 +1,14 @@
 // crates/ingress/src/swap_builder.rs
 // Jupiter Swap Builder — FIXED & UPDATED TO SWAP V2 (April 2026)
-// Uses https://api.jup.ag/swap/v2/build (modern replacement for v1)
+// Uses https://api.jup.ag/swap/v2/build
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 const SWAP_V2_BUILD_URL: &str = "https://api.jup.ag/swap/v2/build";
 const TIMEOUT_MS: u64 = 12_000;
@@ -47,7 +47,7 @@ pub struct SwapInstructionsData {
     pub last_valid_block_height: u64,
 }
 
-// Shared types
+// Shared instruction types
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JupiterAccountMeta {
@@ -73,7 +73,7 @@ pub struct BuiltSwapTransaction {
     pub jito_tip_lamports: u64,
 }
 
-// ── Public API (signature unchanged for compatibility) ───────────────────────
+// ── Public API ───────────────────────────────────────────────────────────────
 pub async fn build_signed_swap_transaction(
     client: &Client,
     input_mint: &str,
@@ -116,7 +116,6 @@ pub async fn build_signed_swap_transaction(
     all_instructions.extend(build_resp.instructions.setup_instructions);
     all_instructions.push(build_resp.instructions.swap_instruction);
 
-    // Add Jito tip as final instruction before cleanup
     let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
     all_instructions.push(tip_ix);
 
@@ -180,7 +179,7 @@ async fn get_swap_build(
     let status = resp.status();
 
     if status.as_u16() == 429 {
-        warn!("Jupiter Swap V2 rate limit hit (429)");
+        warn!("Jupiter Swap V2 rate limit hit (429)");  // You can re-add `warn` import if desired
     }
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -212,7 +211,7 @@ fn build_tip_instruction(
     }
 }
 
-// ── Your original v0 transaction builder (kept intact) ──────────────────────
+// ── Original v0 transaction builder (unchanged) ─────────────────────────────
 fn build_v0_transaction(
     instructions: &[JupiterInstruction],
     _address_lookup_table_addresses: &[String],
@@ -248,12 +247,8 @@ fn build_v0_transaction(
                 is_signer: false,
                 is_writable: false,
             });
-            if acct.is_signer {
-                entry.is_signer = true;
-            }
-            if acct.is_writable {
-                entry.is_writable = true;
-            }
+            if acct.is_signer { entry.is_signer = true; }
+            if acct.is_writable { entry.is_writable = true; }
         }
     }
 
@@ -266,9 +261,7 @@ fn build_v0_transaction(
     all_pubkeys.sort();
 
     for pk in &all_pubkeys {
-        if pk == &payer_b58 {
-            continue;
-        }
+        if pk == &payer_b58 { continue; }
         let entry = &account_map[pk];
         if entry.is_signer {
             if entry.is_writable {
@@ -295,7 +288,7 @@ fn build_v0_transaction(
     }
 
     let mut msg: Vec<u8> = Vec::new();
-    msg.push(0x80u8); // version 0
+    msg.push(0x80u8);
 
     let num_required_sigs = (sw_signers.len() + ro_signers.len()) as u8;
     let num_readonly_signed = ro_signers.len() as u8;
@@ -329,7 +322,7 @@ fn build_v0_transaction(
         msg.extend_from_slice(&data);
     }
 
-    write_compact_u16(&mut msg, 0); // No ALTs for now
+    write_compact_u16(&mut msg, 0); // No ALTs
 
     let payer_sig = sign_fn(&msg);
     let mut tx: Vec<u8> = Vec::with_capacity(3 + 64 * num_required_sigs as usize + msg.len());
@@ -360,7 +353,7 @@ fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
 fn b58_to_32(s: &str) -> [u8; 32] {
     let decoded = bs58::decode(s).into_vec().unwrap_or_default();
     if decoded.len() != 32 {
-        warn!(addr = %s, "b58_to_32: invalid length");
+        tracing::warn!(addr = %s, "b58_to_32: invalid length");
         return [0u8; 32];
     }
     let mut out = [0u8; 32];

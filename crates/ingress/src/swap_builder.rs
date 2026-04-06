@@ -1,16 +1,14 @@
 // =============================================================================
 // JUPITER SWAP BUILDER — Fixed & Production-Ready (April 2026)
 // 
-// Uses: https://api.jup.ag/swap/v1/quote + /swap-instructions
-// Features:
-//   • Correct query string
-//   • Proper instruction ordering with Jito tip
-//   • Static-only v0 transaction (no extra RPC for ALTs)
-//   • Better 429 rate limit handling
-//   • Ready for flash-loan + arbitrage use cases
+// Fixed compilation errors:
+// • resp.text() moves the Response → fixed by checking status first
+// • Proper error handling for 429 and other failures
+// • Clean instruction ordering with Jito tip
+// • Static-only v0 transaction builder
 // =============================================================================
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -39,7 +37,7 @@ pub struct QuoteResponse {
     pub route_plan: Vec<serde_json::Value>,
 }
 
-// ── Swap Instructions Response (v1) ──────────────────────────────────────────
+// ── Swap Instructions Response ───────────────────────────────────────────────
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JupiterAccountMeta {
@@ -53,7 +51,7 @@ pub struct JupiterAccountMeta {
 pub struct JupiterInstruction {
     pub program_id: String,
     pub accounts: Vec<JupiterAccountMeta>,
-    pub data: String, // base64 encoded
+    pub data: String, // base64
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -106,7 +104,6 @@ pub async fn build_signed_swap_transaction(
     jito_tip_account: &str,
     sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
 ) -> Result<BuiltSwapTransaction> {
-    // 1. Get Quote
     let quote = get_quote(client, input_mint, output_mint, amount, slippage_bps, api_key)
         .await
         .context("Jupiter /swap/v1/quote failed")?;
@@ -123,7 +120,6 @@ pub async fn build_signed_swap_transaction(
         "Jupiter quote received successfully"
     );
 
-    // 2. Get Swap Instructions
     let swap_ix_resp = get_swap_instructions(client, &quote, user_pubkey_b58, api_key)
         .await
         .context("Jupiter /swap/v1/swap-instructions failed")?;
@@ -137,14 +133,14 @@ pub async fn build_signed_swap_transaction(
         "Jupiter swap instructions received"
     );
 
-    // 3. Assemble instructions (correct order)
+    // Assemble instructions in correct order
     let mut all_instructions: Vec<JupiterInstruction> = Vec::new();
 
     all_instructions.extend(swap_ix_resp.compute_budget_instructions);
     all_instructions.extend(swap_ix_resp.setup_instructions);
     all_instructions.push(swap_ix_resp.swap_instruction);
 
-    // Jito tip instruction
+    // Jito tip
     let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
     all_instructions.push(tip_ix);
 
@@ -153,7 +149,7 @@ pub async fn build_signed_swap_transaction(
     }
     all_instructions.extend(swap_ix_resp.other_instructions);
 
-    // 4. Build & sign v0 transaction (static-only)
+    // Build v0 transaction
     let tx_bytes = build_v0_transaction(
         &all_instructions,
         &swap_ix_resp.address_lookup_table_addresses,
@@ -185,7 +181,7 @@ pub fn build_swap_client() -> Result<Client> {
         .build()?)
 }
 
-// ── Helper: Get Quote ────────────────────────────────────────────────────────
+// ── Get Quote ────────────────────────────────────────────────────────────────
 async fn get_quote(
     client: &Client,
     input_mint: &str,
@@ -208,25 +204,26 @@ async fn get_quote(
 
     let resp = req.send().await.context("Quote HTTP request failed")?;
 
-    if resp.status().as_u16() == 429 {
-        warn!("Jupiter quote rate limit (429) — consider API key or backoff");
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        warn!("Jupiter quote rate limit hit (429) — consider API key or backoff");
     }
 
-    if !resp.status().is_success() {
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
+        return Err(anyhow!(
             "Jupiter quote HTTP {}: {}",
-            resp.status(),
+            status,
             &body[..body.len().min(500)]
-        );
+        ));
     }
 
     resp.json::<QuoteResponse>()
         .await
-        .context("Failed to parse quote response")
+        .context("Failed to parse Jupiter quote response")
 }
 
-// ── Helper: Get Swap Instructions ────────────────────────────────────────────
+// ── Get Swap Instructions ────────────────────────────────────────────────────
 async fn get_swap_instructions(
     client: &Client,
     quote: &QuoteResponse,
@@ -255,17 +252,18 @@ async fn get_swap_instructions(
 
     let resp = req.send().await.context("Swap-instructions HTTP request failed")?;
 
-    if resp.status().as_u16() == 429 {
-        warn!("Jupiter swap-instructions rate limit (429)");
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        warn!("Jupiter swap-instructions rate limit hit (429)");
     }
 
-    if !resp.status().is_success() {
+    if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
+        return Err(anyhow!(
             "Jupiter swap-instructions HTTP {}: {}",
-            resp.status(),
+            status,
             &text[..text.len().min(500)]
-        );
+        ));
     }
 
     resp.json::<SwapInstructionsResponse>()
@@ -300,7 +298,7 @@ fn build_tip_instruction(
     }
 }
 
-// ── v0 Versioned Transaction Builder (Static-only fallback) ──────────────────
+// ── v0 Versioned Transaction Builder ─────────────────────────────────────────
 fn build_v0_transaction(
     instructions: &[JupiterInstruction],
     _address_lookup_table_addresses: &[String],
@@ -318,7 +316,6 @@ fn build_v0_transaction(
     let payer_b58 = bs58::encode(payer_pubkey).into_string();
     let mut account_map: HashMap<String, AccountEntry> = HashMap::new();
 
-    // Insert payer
     account_map.insert(
         payer_b58.clone(),
         AccountEntry {
@@ -328,7 +325,6 @@ fn build_v0_transaction(
         },
     );
 
-    // Collect all accounts from instructions
     for ix in instructions {
         account_map.entry(ix.program_id.clone()).or_insert_with(|| AccountEntry {
             pubkey_bytes: b58_to_32(&ix.program_id),
@@ -351,13 +347,12 @@ fn build_v0_transaction(
         }
     }
 
-    // Classify accounts for v0 message
     let mut sw_signers: Vec<String> = vec![payer_b58.clone()];
     let mut ro_signers: Vec<String> = Vec::new();
     let mut sw_static: Vec<String> = Vec::new();
     let mut ro_static: Vec<String> = Vec::new();
 
-    let mut all_pubkeys: Vec<_> = account_map.keys().cloned().collect();
+    let mut all_pubkeys: Vec<String> = account_map.keys().cloned().collect();
     all_pubkeys.sort();
 
     for pk in &all_pubkeys {
@@ -432,17 +427,15 @@ fn build_v0_transaction(
         msg.extend_from_slice(&data);
     }
 
-    // No address lookup tables (static-only)
-    write_compact_u16(&mut msg, 0);
+    write_compact_u16(&mut msg, 0); // No ALTs
 
-    // Sign the message
+    // Sign
     let payer_sig = sign_fn(&msg);
     let mut tx: Vec<u8> = Vec::with_capacity(3 + 64 * num_required_sigs as usize + msg.len());
 
     write_compact_u16(&mut tx, num_required_sigs as u16);
     tx.extend_from_slice(&payer_sig);
 
-    // Placeholder signatures for other signers (if any)
     for _ in 1..num_required_sigs {
         tx.extend_from_slice(&[0u8; 64]);
     }
@@ -453,7 +446,7 @@ fn build_v0_transaction(
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
-fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
+fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
     if val < 0x80 {
         buf.push(val as u8);
     } else if val < 0x4000 {
@@ -469,7 +462,7 @@ fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
 fn b58_to_32(s: &str) -> [u8; 32] {
     let decoded = bs58::decode(s).into_vec().unwrap_or_default();
     if decoded.len() != 32 {
-        warn!(addr = %s, len = decoded.len(), "b58_to_32: invalid length, zeroing");
+        warn!(addr = %s, len = decoded.len(), "b58_to_32: invalid length");
         return [0u8; 32];
     }
     let mut out = [0u8; 32];

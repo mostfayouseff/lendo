@@ -1,6 +1,4 @@
 // crates/ingress/src/lib.rs
-// INGRESS CRATE — Live data ingress from Helius, Alchemy, and Jupiter
-
 pub mod filter;
 pub mod helius_ws;
 pub mod jupiter;
@@ -17,8 +15,6 @@ pub use swap_builder::{
     build_signed_swap_transaction,
     build_swap_client,
     BuiltSwapTransaction,
-    // Internal types - only re-export if other crates really need them
-    // JupiterAccountMeta, JupiterInstruction, QuoteResponse, SwapInstructionsResponse,
 };
 pub use ultra::{
     build_ultra_client,
@@ -31,13 +27,13 @@ pub use ultra::{
 };
 pub use yellowstone::{MockYellowstoneStream, SlotUpdate};
 
-// Jupiter price monitor exports (fixed)
+// Jupiter price monitor exports
 pub use jupiter::{
     JupiterMonitor,
     build_token_info_map,
     KnownToken,
     TokenInfo,
-    TOKENS,           // now properly exported
+    TOKENS,
 };
 
 // Error type

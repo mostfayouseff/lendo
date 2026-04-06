@@ -1,408 +1,420 @@
-// =============================================================================
-// PRICE MONITOR — Self-Healing Multi-Source Price Feed (Fixed 2026-04)
-// 
-// Fixes:
-// • Reduced polling frequency + exponential backoff to avoid 429
-// • Better rate-limit detection
-// • Clearer logging for failures
-// • Still prioritizes Jupiter v3 when possible
-// =============================================================================
+// crates/ingress/src/swap_builder.rs
+// Jupiter Swap Builder - Fixed for v1 API (2026)
 
-use common::types::{Dex, MarketEdge, TokenMint};
+use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
 use reqwest::Client;
-use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-const POLL_INTERVAL_MS: u64 = 10_000;           // ← Increased from 2s to reduce rate limiting
-const HTTP_TIMEOUT_MS: u64 = 10_000;
-const MAX_LOG_WEIGHT: f64 = 2.0;
-const MIN_LOG_WEIGHT: f64 = -2.0;
-const JUPITER_SLOT_SENTINEL: u64 = u64::MAX;
+const QUOTE_URL: &str = "https://api.jup.ag/swap/v1/quote";
+const SWAP_INSTRUCTIONS_URL: &str = "https://api.jup.ag/swap/v1/swap-instructions";
+const TIMEOUT_MS: u64 = 12_000;
 
-const BACKOFF_BASE_MS: u64 = 2_000;
-const MAX_BACKOFF_MS: u64 = 30_000;
+const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 
-// ── Token universe (unchanged) ───────────────────────────────────────────────
-#[derive(Debug, Clone)]
-pub struct KnownToken {
-    pub symbol: &'static str,
-    pub mint: &'static str,
-    pub decimals: u32,
-    pub quote_amount: u64,
-    pub coingecko_id: &'static str,
-}
-
-pub use KnownToken as TokenInfo;
-
-pub const TOKENS: &[KnownToken] = &[
-    KnownToken { symbol: "SOL", mint: "So11111111111111111111111111111111111111112", decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "solana" },
-    KnownToken { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, quote_amount: 1_000_000, coingecko_id: "usd-coin" },
-    KnownToken { symbol: "USDT", mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", decimals: 6, quote_amount: 1_000_000, coingecko_id: "tether" },
-    KnownToken { symbol: "ORCA", mint: "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE", decimals: 6, quote_amount: 1_000_000, coingecko_id: "orca" },
-    KnownToken { symbol: "JUP", mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", decimals: 6, quote_amount: 1_000_000, coingecko_id: "jupiter-exchange-solana" },
-    KnownToken { symbol: "mSOL", mint: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "msol" },
-    KnownToken { symbol: "JitoSOL", mint: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", decimals: 9, quote_amount: 1_000_000_000, coingecko_id: "jito-staked-sol" },
-    KnownToken { symbol: "BONK", mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", decimals: 5, quote_amount: 1_000_000, coingecko_id: "bonk" },
-    KnownToken { symbol: "WIF", mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", decimals: 6, quote_amount: 1_000_000, coingecko_id: "dogwifcoin" },
-    KnownToken { symbol: "RENDER", mint: "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof", decimals: 8, quote_amount: 1_000_000, coingecko_id: "render-token" },
-];
-
-pub fn build_token_info_map() -> HashMap<&'static str, &'static KnownToken> {
-    TOKENS.iter().map(|t| (t.mint, t)).collect()
-}
-
-// ── Response types (unchanged) ───────────────────────────────────────────────
-#[derive(Debug, Deserialize)]
+// ── Quote Response ───────────────────────────────────────────────────────────
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct JupiterPriceV3Item {
-    usd_price: Option<f64>,
+pub struct QuoteResponse {
+    pub input_mint: String,
+    pub in_amount: String,
+    pub output_mint: String,
+    pub out_amount: String,
+    pub other_amount_threshold: String,
+    pub swap_mode: String,
+    pub slippage_bps: u64,
+    pub price_impact_pct: String,
+    pub route_plan: Vec<serde_json::Value>,
 }
 
-type CoinGeckoResponse = HashMap<String, HashMap<String, f64>>;
-
-#[derive(Debug, Clone, PartialEq)]
-enum PriceSource {
-    JupiterV3,
-    CoinGecko,
+// ── Swap Instructions Response ───────────────────────────────────────────────
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct JupiterAccountMeta {
+    pub pubkey: String,
+    pub is_signer: bool,
+    pub is_writable: bool,
 }
 
-impl PriceSource {
-    fn name(&self) -> &'static str {
-        match self {
-            PriceSource::JupiterV3 => "Jupiter Price v3 API",
-            PriceSource::CoinGecko => "CoinGecko public API",
-        }
-    }
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct JupiterInstruction {
+    pub program_id: String,
+    pub accounts: Vec<JupiterAccountMeta>,
+    pub data: String, // base64
 }
 
-// ── Main Monitor ─────────────────────────────────────────────────────────────
-pub struct JupiterMonitor;
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapInstructionsResponse {
+    pub compute_budget_instructions: Vec<JupiterInstruction>,
+    pub setup_instructions: Vec<JupiterInstruction>,
+    pub swap_instruction: JupiterInstruction,
+    pub cleanup_instruction: Option<JupiterInstruction>,
+    pub other_instructions: Vec<JupiterInstruction>,
+    pub address_lookup_table_addresses: Vec<String>,
+    pub blockhash: String,
+    pub last_valid_block_height: u64,
+    pub prioritization_fee_lamports: Option<u64>,
+}
 
-impl JupiterMonitor {
-    #[must_use]
-    pub fn spawn() -> mpsc::Receiver<Vec<MarketEdge>> {
-        Self::spawn_with_key(None)
+// ── Request Body ─────────────────────────────────────────────────────────────
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SwapInstructionsRequest<'a> {
+    quote_response: &'a QuoteResponse,
+    user_public_key: &'a str,
+    wrap_and_unwrap_sol: bool,
+    use_shared_accounts: bool,
+    dynamic_compute_unit_limit: bool,
+    skip_user_accounts_rpc_calls: bool,
+    use_token_ledger: bool,
+}
+
+// ── Output ───────────────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct BuiltSwapTransaction {
+    pub transaction_bytes: Vec<u8>,
+    pub in_amount: u64,
+    pub out_amount: u64,
+    pub jito_tip_lamports: u64,
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+pub async fn build_signed_swap_transaction(
+    client: &Client,
+    input_mint: &str,
+    output_mint: &str,
+    amount: u64,
+    user_pubkey_b58: &str,
+    user_pubkey: &[u8; 32],
+    api_key: Option<&str>,
+    slippage_bps: u16,
+    jito_tip_lamports: u64,
+    jito_tip_account: &str,
+    sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
+) -> Result<BuiltSwapTransaction> {
+    let quote = get_quote(client, input_mint, output_mint, amount, slippage_bps, api_key)
+        .await
+        .context("Jupiter /swap/v1/quote failed")?;
+
+    let in_amount: u64 = quote.in_amount.parse().unwrap_or(amount);
+    let out_amount: u64 = quote.out_amount.parse().unwrap_or(0);
+
+    info!(
+        input_mint = %input_mint,
+        output_mint = %output_mint,
+        in_amount,
+        out_amount,
+        slippage_bps,
+        "Jupiter quote received successfully"
+    );
+
+    let swap_ix_resp = get_swap_instructions(client, &quote, user_pubkey_b58, api_key)
+        .await
+        .context("Jupiter /swap/v1/swap-instructions failed")?;
+
+    info!(
+        compute_ixs = swap_ix_resp.compute_budget_instructions.len(),
+        setup_ixs = swap_ix_resp.setup_instructions.len(),
+        has_cleanup = swap_ix_resp.cleanup_instruction.is_some(),
+        alts = swap_ix_resp.address_lookup_table_addresses.len(),
+        blockhash = %swap_ix_resp.blockhash,
+        "Jupiter swap instructions received"
+    );
+
+    let mut all_instructions: Vec<JupiterInstruction> = Vec::new();
+    all_instructions.extend(swap_ix_resp.compute_budget_instructions);
+    all_instructions.extend(swap_ix_resp.setup_instructions);
+    all_instructions.push(swap_ix_resp.swap_instruction);
+
+    // Jito tip
+    let tip_ix = build_tip_instruction(user_pubkey_b58, jito_tip_account, jito_tip_lamports);
+    all_instructions.push(tip_ix);
+
+    if let Some(cleanup) = swap_ix_resp.cleanup_instruction {
+        all_instructions.push(cleanup);
+    }
+    all_instructions.extend(swap_ix_resp.other_instructions);
+
+    let tx_bytes = build_v0_transaction(
+        &all_instructions,
+        &swap_ix_resp.address_lookup_table_addresses,
+        &swap_ix_resp.blockhash,
+        user_pubkey,
+        sign_fn,
+    )
+    .context("Failed to build v0 versioned transaction")?;
+
+    info!(
+        tx_size = tx_bytes.len(),
+        in_amount,
+        out_amount,
+        jito_tip_lamports,
+        "Jupiter swap transaction built and signed (v0)"
+    );
+
+    Ok(BuiltSwapTransaction {
+        transaction_bytes: tx_bytes,
+        in_amount,
+        out_amount,
+        jito_tip_lamports,
+    })
+}
+
+pub fn build_swap_client() -> Result<Client> {
+    Ok(Client::builder()
+        .timeout(Duration::from_millis(TIMEOUT_MS))
+        .build()?)
+}
+
+// ── Internal Helpers ─────────────────────────────────────────────────────────
+async fn get_quote(
+    client: &Client,
+    input_mint: &str,
+    output_mint: &str,
+    amount: u64,
+    slippage_bps: u16,
+    api_key: Option<&str>,
+) -> Result<QuoteResponse> {
+    let url = format!(
+        "{}?inputMint={}&outputMint={}&amount={}&slippageBps={}&onlyDirectRoutes=false",
+        QUOTE_URL, input_mint, output_mint, amount, slippage_bps
+    );
+
+    let mut req = client.get(&url).header("accept", "application/json");
+    if let Some(key) = api_key {
+        req = req.header("x-api-key", key);
     }
 
-    #[must_use]
-    pub fn spawn_with_key(api_key: Option<String>) -> mpsc::Receiver<Vec<MarketEdge>> {
-        let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(Self::run(tx, api_key));
-        rx
+    let resp = req.send().await.context("Quote HTTP request failed")?;
+    let status = resp.status();
+
+    if status.as_u16() == 429 {
+        warn!("Jupiter quote rate limit hit (429)");
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Jupiter quote HTTP {}: {}",
+            status,
+            &body[..body.len().min(500)]
+        ));
     }
 
-    async fn run(tx: mpsc::Sender<Vec<MarketEdge>>, api_key: Option<String>) {
-        let client = match Client::builder()
-            .timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Price monitor: failed to build HTTP client");
-                return;
-            }
-        };
+    resp.json().await.context("Failed to parse quote")
+}
 
-        let sol_mint = "So11111111111111111111111111111111111111112";
-        info!(
-            tokens = TOKENS.len(),
-            poll_ms = POLL_INTERVAL_MS,
-            has_key = api_key.is_some(),
-            "Price monitor started — sources: Jupiter v3 → CoinGecko → stale cache"
-        );
+async fn get_swap_instructions(
+    client: &Client,
+    quote: &QuoteResponse,
+    user_pubkey: &str,
+    api_key: Option<&str>,
+) -> Result<SwapInstructionsResponse> {
+    let body = SwapInstructionsRequest {
+        quote_response: quote,
+        user_public_key: user_pubkey,
+        wrap_and_unwrap_sol: true,
+        use_shared_accounts: true,
+        dynamic_compute_unit_limit: true,
+        skip_user_accounts_rpc_calls: true,
+        use_token_ledger: false,
+    };
 
-        let mut price_cache: HashMap<String, f64> = HashMap::new();
-        let mut active_source = PriceSource::JupiterV3;
-        let mut consecutive_failures: u32 = 0;
-        let mut backoff_ms = BACKOFF_BASE_MS;
+    let mut req = client
+        .post(SWAP_INSTRUCTIONS_URL)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .json(&body);
 
-        loop {
-            sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-
-            let result = match &active_source {
-                PriceSource::JupiterV3 => Self::fetch_jupiter_v3(&client, api_key.as_deref()).await,
-                PriceSource::CoinGecko => Self::fetch_coingecko(&client).await,
-            };
-
-            match result {
-                Ok(prices) if !prices.is_empty() => {
-                    if consecutive_failures > 0 {
-                        info!(
-                            source = active_source.name(),
-                            after_failures = consecutive_failures,
-                            "NEW API DISCOVERED AND VERIFIED: {} is live",
-                            active_source.name()
-                        );
-                    }
-                    consecutive_failures = 0;
-                    backoff_ms = BACKOFF_BASE_MS;
-
-                    for (mint, price) in &prices {
-                        price_cache.insert(mint.clone(), *price);
-                    }
-
-                    let sol_price = match price_cache.get(sol_mint) {
-                        Some(&p) if p > 0.0 => p,
-                        _ => {
-                            warn!("Price monitor: SOL price missing — skipping");
-                            continue;
-                        }
-                    };
-
-                    let edges = build_edges_from_prices(&price_cache, sol_price);
-                    if edges.is_empty() {
-                        continue;
-                    }
-
-                    // Throttled info log every 30s
-                    {
-                        static LAST_INFO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-
-                        if now.saturating_sub(LAST_INFO.load(std::sync::atomic::Ordering::Relaxed)) >= 30 {
-                            LAST_INFO.store(now, std::sync::atomic::Ordering::Relaxed);
-                            info!(
-                                source = active_source.name(),
-                                edges = edges.len(),
-                                sol_price_usd = format!("{:.2}", sol_price),
-                                "LIVE DATA SOURCE: {} — price matrix updated",
-                                active_source.name()
-                            );
-                        }
-                    }
-
-                    let _ = tx.send(edges).await;
-                }
-                _ => {
-                    consecutive_failures += 1;
-                    warn!(
-                        source = active_source.name(),
-                        failures = consecutive_failures,
-                        "JUPITER API FAILED — SEARCHING FOR ALTERNATIVE price source"
-                    );
-
-                    active_source = Self::try_failover(
-                        &client,
-                        &active_source,
-                        &api_key,
-                        &mut price_cache,
-                        sol_mint,
-                        &tx,
-                    ).await;
-
-                    // Simple backoff on repeated failures
-                    if consecutive_failures > 3 {
-                        sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-                    }
-                }
-            }
-        }
+    if let Some(key) = api_key {
+        req = req.header("x-api-key", key);
     }
 
-    // try_failover, fetch_jupiter_v3, fetch_coingecko, build_edges_from_prices, mint_to_token_mint
-    // remain almost identical to your original — only minor logging tweaks
+    let resp = req.send().await.context("Swap-instructions HTTP request failed")?;
+    let status = resp.status();
 
-    async fn try_failover(
-        client: &Client,
-        current: &PriceSource,
-        api_key: &Option<String>,
-        price_cache: &mut HashMap<String, f64>,
-        sol_mint: &str,
-        tx: &mpsc::Sender<Vec<MarketEdge>>,
-    ) -> PriceSource {
-        let next = match current {
-            PriceSource::JupiterV3 => PriceSource::CoinGecko,
-            PriceSource::CoinGecko => PriceSource::JupiterV3,
-        };
-
-        let next_result = match &next {
-            PriceSource::JupiterV3 => Self::fetch_jupiter_v3(client, api_key.as_deref()).await,
-            PriceSource::CoinGecko => Self::fetch_coingecko(client).await,
-        };
-
-        match next_result {
-            Ok(prices) if !prices.is_empty() => {
-                info!(
-                    from = current.name(),
-                    to = next.name(),
-                    "NEW API DISCOVERED AND VERIFIED: switching to {}",
-                    next.name()
-                );
-                for (mint, price) in &prices {
-                    price_cache.insert(mint.clone(), *price);
-                }
-                let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
-                if sol_price > 0.0 {
-                    let edges = build_edges_from_prices(price_cache, sol_price);
-                    if !edges.is_empty() {
-                        let _ = tx.send(edges).await;
-                    }
-                }
-                next
-            }
-            _ => {
-                let sol_price = price_cache.get(sol_mint).copied().unwrap_or(0.0);
-                if sol_price > 0.0 && !price_cache.is_empty() {
-                    warn!(
-                        sol_price,
-                        cached_tokens = price_cache.len(),
-                        "Price monitor: ALL sources failed — using STALE CACHE"
-                    );
-                    let edges = build_edges_from_prices(price_cache, sol_price);
-                    if !edges.is_empty() {
-                        let _ = tx.send(edges).await;
-                    }
-                } else {
-                    warn!("Price monitor: all sources failed, no usable cache");
-                }
-                current.clone()
-            }
-        }
+    if status.as_u16() == 429 {
+        warn!("Jupiter swap-instructions rate limit hit (429)");
+    }
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Jupiter swap-instructions HTTP {}: {}",
+            status,
+            &text[..text.len().min(500)]
+        ));
     }
 
-    async fn fetch_jupiter_v3(
-        client: &Client,
-        api_key: Option<&str>,
-    ) -> anyhow::Result<HashMap<String, f64>> {
-        let ids: Vec<&str> = TOKENS.iter().map(|t| t.mint).collect();
-        let url = format!("https://api.jup.ag/price/v3?ids={}", ids.join(","));
+    resp.json().await.context("Failed to parse swap-instructions")
+}
 
-        let mut req = client.get(&url).header("accept", "application/json");
-        if let Some(key) = api_key {
-            req = req.header("x-api-key", key);
-        }
+fn build_tip_instruction(
+    from_pubkey: &str,
+    tip_account: &str,
+    lamports: u64,
+) -> JupiterInstruction {
+    let mut data = vec![2u8, 0, 0, 0];
+    data.extend_from_slice(&lamports.to_le_bytes());
 
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Jupiter v3 HTTP {}: {}",
-                status,
-                &text[..text.len().min(300)]
-            ));
-        }
-
-        let body_text = resp.text().await?;
-        let data: HashMap<String, JupiterPriceV3Item> = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Jupiter v3 JSON parse error: {e}"))?;
-
-        let mut prices = HashMap::new();
-        for (mint, item) in data {
-            if let Some(price) = item.usd_price {
-                if price > 0.0 {
-                    prices.insert(mint, price);
-                }
-            }
-        }
-        Ok(prices)
-    }
-
-    async fn fetch_coingecko(client: &Client) -> anyhow::Result<HashMap<String, f64>> {
-        let coin_ids: Vec<&str> = TOKENS
-            .iter()
-            .filter(|t| !t.coingecko_id.is_empty())
-            .map(|t| t.coingecko_id)
-            .collect();
-
-        if coin_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let url = format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
-            coin_ids.join(",")
-        );
-
-        let resp = client.get(&url).header("Accept", "application/json").send().await?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("CoinGecko HTTP {}: {}", resp.status(), &text[..text.len().min(200)]));
-        }
-
-        let cg: CoinGeckoResponse = resp.json().await?;
-        let id_to_mint: HashMap<&str, &str> = TOKENS
-            .iter()
-            .filter(|t| !t.coingecko_id.is_empty())
-            .map(|t| (t.coingecko_id, t.mint))
-            .collect();
-
-        let mut prices = HashMap::new();
-        for (cg_id, currency_map) in &cg {
-            if let Some(&usd) = currency_map.get("usd") {
-                if usd > 0.0 {
-                    if let Some(&mint) = id_to_mint.get(cg_id.as_str()) {
-                        prices.insert(mint.to_string(), usd);
-                    }
-                }
-            }
-        }
-        Ok(prices)
+    JupiterInstruction {
+        program_id: SYSTEM_PROGRAM.to_string(),
+        accounts: vec![
+            JupiterAccountMeta { pubkey: from_pubkey.to_string(), is_signer: true, is_writable: true },
+            JupiterAccountMeta { pubkey: tip_account.to_string(), is_signer: false, is_writable: true },
+        ],
+        data: base64::engine::general_purpose::STANDARD.encode(&data),
     }
 }
 
-// ── Edge builder (unchanged) ─────────────────────────────────────────────────
-fn mint_to_token_mint(mint: &str) -> TokenMint {
-    let mut arr = [0u8; 32];
-    if let Ok(b) = bs58::decode(mint).into_vec() {
-        let len = b.len().min(32);
-        arr[..len].copy_from_slice(&b[..len]);
+fn build_v0_transaction(
+    instructions: &[JupiterInstruction],
+    _address_lookup_table_addresses: &[String],
+    blockhash_b58: &str,
+    payer_pubkey: &[u8; 32],
+    sign_fn: &dyn Fn(&[u8]) -> [u8; 64],
+) -> Result<Vec<u8>> {
+    #[derive(Clone)]
+    struct AccountEntry {
+        pubkey_bytes: [u8; 32],
+        is_signer: bool,
+        is_writable: bool,
     }
-    TokenMint::new(arr)
-}
 
-fn build_edges_from_prices(
-    price_cache: &HashMap<String, f64>,
-    sol_price_usd: f64,
-) -> Vec<MarketEdge> {
-    let mut edges = Vec::new();
-    let liq_estimate = ((sol_price_usd * 1_000_000.0) as u64).max(1_000_000_000);
+    let payer_b58 = bs58::encode(payer_pubkey).into_string();
+    let mut account_map: HashMap<String, AccountEntry> = HashMap::new();
 
-    for i in 0..TOKENS.len() {
-        let ta = &TOKENS[i];
-        let price_a = match price_cache.get(ta.mint) {
-            Some(&p) if p > 0.0 => p,
-            _ => continue,
-        };
+    account_map.insert(
+        payer_b58.clone(),
+        AccountEntry { pubkey_bytes: *payer_pubkey, is_signer: true, is_writable: true },
+    );
 
-        for j in 0..TOKENS.len() {
-            if i == j { continue; }
-            let tb = &TOKENS[j];
-            let price_b = match price_cache.get(tb.mint) {
-                Some(&p) if p > 0.0 => p,
-                _ => continue,
-            };
+    for ix in instructions {
+        account_map.entry(ix.program_id.clone()).or_insert_with(|| AccountEntry {
+            pubkey_bytes: b58_to_32(&ix.program_id),
+            is_signer: false,
+            is_writable: false,
+        });
 
-            let raw = -(price_b / price_a).ln();
-            let clamped = raw.clamp(MIN_LOG_WEIGHT, MAX_LOG_WEIGHT);
-            let log_weight = Decimal::try_from(clamped).unwrap_or(Decimal::ZERO);
+        for acct in &ix.accounts {
+            let entry = account_map.entry(acct.pubkey.clone()).or_insert_with(|| AccountEntry {
+                pubkey_bytes: b58_to_32(&acct.pubkey),
+                is_signer: false,
+                is_writable: false,
+            });
+            if acct.is_signer { entry.is_signer = true; }
+            if acct.is_writable { entry.is_writable = true; }
+        }
+    }
 
-            let dexes: &[Dex] = if i < 4 && j < 4 {
-                &[Dex::JupiterV6, Dex::Raydium, Dex::Orca, Dex::Meteora, Dex::Phoenix]
+    let mut sw_signers: Vec<String> = vec![payer_b58.clone()];
+    let mut ro_signers: Vec<String> = Vec::new();
+    let mut sw_static: Vec<String> = Vec::new();
+    let mut ro_static: Vec<String> = Vec::new();
+
+    let mut all_pubkeys: Vec<String> = account_map.keys().cloned().collect();
+    all_pubkeys.sort();
+
+    for pk in &all_pubkeys {
+        if pk == &payer_b58 { continue; }
+        let entry = &account_map[pk];
+        if entry.is_signer {
+            if entry.is_writable {
+                sw_signers.push(pk.clone());
             } else {
-                &[Dex::JupiterV6, Dex::Raydium]
-            };
-
-            for &dex in dexes {
-                edges.push(MarketEdge {
-                    from: mint_to_token_mint(ta.mint),
-                    to: mint_to_token_mint(tb.mint),
-                    dex,
-                    log_weight,
-                    liquidity_lamports: liq_estimate,
-                    slot: JUPITER_SLOT_SENTINEL,
-                });
+                ro_signers.push(pk.clone());
             }
+        } else if entry.is_writable {
+            sw_static.push(pk.clone());
+        } else {
+            ro_static.push(pk.clone());
         }
     }
-    edges
+
+    let mut static_accounts: Vec<String> = Vec::new();
+    static_accounts.extend(sw_signers.iter().cloned());
+    static_accounts.extend(ro_signers.iter().cloned());
+    static_accounts.extend(sw_static.iter().cloned());
+    static_accounts.extend(ro_static.iter().cloned());
+
+    let mut combined_index: HashMap<String, u8> = HashMap::new();
+    for (idx, pk) in static_accounts.iter().enumerate() {
+        combined_index.insert(pk.clone(), idx as u8);
+    }
+
+    let mut msg: Vec<u8> = Vec::new();
+    msg.push(0x80u8);
+
+    let num_required_sigs = (sw_signers.len() + ro_signers.len()) as u8;
+    let num_readonly_signed = ro_signers.len() as u8;
+    let num_readonly_unsigned = ro_static.len() as u8;
+
+    msg.push(num_required_sigs);
+    msg.push(num_readonly_signed);
+    msg.push(num_readonly_unsigned);
+
+    write_compact_u16(&mut msg, static_accounts.len() as u16);
+    for pk_b58 in &static_accounts {
+        msg.extend_from_slice(&b58_to_32(pk_b58));
+    }
+    msg.extend_from_slice(&b58_to_32(blockhash_b58));
+
+    write_compact_u16(&mut msg, instructions.len() as u16);
+    for ix in instructions {
+        let prog_idx = *combined_index.get(&ix.program_id).unwrap_or(&0);
+        msg.push(prog_idx);
+
+        write_compact_u16(&mut msg, ix.accounts.len() as u16);
+        for acct in &ix.accounts {
+            let acct_idx = *combined_index.get(&acct.pubkey).unwrap_or(&0);
+            msg.push(acct_idx);
+        }
+
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&ix.data)
+            .unwrap_or_default();
+        write_compact_u16(&mut msg, data.len() as u16);
+        msg.extend_from_slice(&data);
+    }
+
+    write_compact_u16(&mut msg, 0); // No ALTs
+
+    let payer_sig = sign_fn(&msg);
+    let mut tx: Vec<u8> = Vec::with_capacity(3 + 64 * num_required_sigs as usize + msg.len());
+
+    write_compact_u16(&mut tx, num_required_sigs as u16);
+    tx.extend_from_slice(&payer_sig);
+    for _ in 1..num_required_sigs {
+        tx.extend_from_slice(&[0u8; 64]);
+    }
+    tx.extend_from_slice(&msg);
+
+    Ok(tx)
+}
+
+fn write_compact_u16(buf: &mut Vec<u8>, val: u16) {
+    if val < 0x80 {
+        buf.push(val as u8);
+    } else if val < 0x4000 {
+        buf.push((val as u8 & 0x7f) | 0x80);
+        buf.push((val >> 7) as u8);
+    } else {
+        buf.push((val as u8 & 0x7f) | 0x80);
+        buf.push(((val >> 7) as u8 & 0x7f) | 0x80);
+        buf.push((val >> 14) as u8);
+    }
+}
+
+fn b58_to_32(s: &str) -> [u8; 32] {
+    let decoded = bs58::decode(s).into_vec().unwrap_or_default();
+    if decoded.len() != 32 {
+        warn!(addr = %s, "b58_to_32: invalid length");
+        return [0u8; 32];
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    out
 }

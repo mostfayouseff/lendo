@@ -1,0 +1,207 @@
+You are a senior Solana MEV engineer.
+
+Your task is to analyze, refactor, and fully implement a **production-grade atomic MEV arbitrage system** using **flash loans** and **Jupiter Swap API (V2)**.
+
+You MUST strictly follow the official Jupiter API references and modern Solana MEV best practices.
+
+---
+
+## OFFICIAL API REFERENCES
+
+* GET /order → https://dev.jup.ag/docs/api-reference/swap/order
+* GET /build → https://dev.jup.ag/docs/api-reference/swap/build
+* POST /execute → https://dev.jup.ag/docs/api-reference/swap/execute
+
+Full documentation index: https://dev.jup.ag/docs/llms.txt
+
+**Do NOT** guess endpoints, invent parameters, or use deprecated APIs.
+
+---
+
+## API CONFIGURATION
+
+* Base URL: `https://api.jup.ag/swap/v2`
+* Authorization: `x-api-key: <YOUR_API_KEY>` (mandatory)
+
+---
+
+## ENDPOINT USAGE (STRICT)
+
+### GET /order
+
+* ONLY for **opportunity detection**
+* Returns: quote, outAmount, routePlan, priceImpact
+* Uses all routers → best price
+* **Do NOT** use its transaction for MEV execution
+
+### GET /build
+
+* ONLY for **building atomic transactions**
+* Returns: swap instructions, account metas, and Address Lookup Tables (ALTs)
+* Metis routing only
+* Mandatory for MEV: allows injection into atomic tx
+
+### POST /execute
+
+* **DO NOT** use in MEV system
+* Managed execution → breaks atomic arbitrage
+* Prevents custom instruction injection
+
+---
+
+## FORBIDDEN
+
+* /swap/v1/*
+* ultra/v1
+* /swap-instructions (legacy)
+* lite-api.jup.ag
+* Any mocks, placeholders, or dummy accounts
+
+---
+
+## CORE OBJECTIVE
+
+Build a **FULLY ATOMIC arbitrage transaction**:
+
+1. Borrow via flash loan
+2. Execute Swap #1 (via /build)
+3. Execute Swap #2 (via /build or another DEX)
+4. Repay flash loan
+5. Retain profit
+
+**All inside a single VersionedTransaction v0**, fully atomic.
+
+---
+
+## TRANSACTION STRUCTURE
+
+```
+[ComputeBudget]
+[FlashLoanBorrow]
+[Swap1]
+[Swap2]
+[FlashLoanRepay]
+[JitoTip (optional)]
+```
+
+* Deterministic instruction order
+* Full revert on failure
+* Correct account metas and ALT handling
+
+---
+
+## SYSTEM ARCHITECTURE
+
+### detection.rs
+
+* Calls GET /order
+* Parses quote, routePlan, priceImpact
+* Detects profitable opportunities
+
+### swap_v2.rs
+
+* Calls GET /build
+* Extracts swap instructions, account metas, and ALTs
+* Fetches ALTs from chain and constructs MessageAddressTableLookup entries
+* Validates all accounts exist → **no mocks/subs allowed**
+
+### flash_tx_v2.rs / atomic_tx.rs
+
+* Builds **VersionedTransaction v0**
+* Combines:
+
+  * ComputeBudget
+  * FlashLoanBorrow
+  * Swap instructions with account metas
+  * FlashLoanRepay
+  * Optional Jito tip
+* Ensures exact repayment amounts
+* Discards any instruction referencing placeholder, dummy, or mock accounts
+
+### signer.rs
+
+* Signs with all required keypairs:
+
+  * Payer
+  * Flash loan authority (if required)
+  * Any PDA signer via seeds
+
+### executor.rs
+
+* Simulates transaction **before sending**
+* On simulation failure → DO NOT send
+* On success → send via Jito bundle or RPC
+
+---
+
+## EXECUTION FLOW
+
+loop:
+
+```rust
+opportunity = detect_opportunity()  // GET /order
+
+if not opportunity.profitable:
+    continue
+
+swap_ixs = get_build_instructions()  // GET /build
+discard any instruction or account that is a placeholder, dummy, or mocked
+
+tx_instructions = [
+    compute_budget_ix,
+    flash_loan_borrow_ix,
+    swap_ix_1,
+    swap_ix_2,
+    flash_loan_repay_ix
+]
+
+versioned_tx = build_v0_transaction(
+    tx_instructions,
+    address_lookup_tables
+)
+
+sign(versioned_tx)  // include all required signers
+
+simulation = simulate_transaction(versioned_tx)
+
+if simulation.success:
+    send_via_jito(versioned_tx)
+else:
+    skip
+```
+
+---
+
+## TECH REQUIREMENTS
+
+* **VersionedTransaction v0 ONLY**
+* Mandatory **Address Lookup Tables**
+* Compute Budget instructions (priority fees)
+* Optional Jito tip instruction
+* Deterministic instruction ordering
+* Correct account metas
+* **No mocks/subs allowed**
+* All accounts must exist on chain
+
+---
+
+## ERROR HANDLING
+
+* If /order fails → skip loop
+* If /build fails → skip loop
+* If simulation fails → DO NOT send
+* Log errors with context
+
+---
+
+## FINAL INSTRUCTION
+
+Think like a professional Solana MEV developer.
+
+* Optimize for latency, atomic success, and profitability
+* DO NOT use /execute
+* DO NOT break atomicity
+* DO NOT use outdated endpoints
+* ENSURE all accounts, ALTs, and instructions are real; **no mocks/subs allowed**
+
+Build **fully functional, production-ready MEV logic**.

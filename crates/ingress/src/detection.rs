@@ -22,7 +22,7 @@ use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-pub const SWAP_V2_BASE: &str = "https://api.jup.ag/swap/v2";
+pub const SWAP_V2_BASE: &str = "https://api.jup.ag/ultra/v1";
 const ORDER_TIMEOUT_MS: u64 = 6_000;
 
 /// Maximum acceptable price impact — opportunities above this are rejected.

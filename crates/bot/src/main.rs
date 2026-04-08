@@ -12,8 +12,8 @@
 //   3. Stale cache                                              (LAST RESORT)
 //
 // EXECUTION — Jupiter Swap V2 API:
-//   GET /swap/v2/order — opportunity detection only (never used to build tx)
-//   GET /swap/v2/build — real swap instructions, ALT resolution, Metis routing
+//   GET /ultra/v1/order — opportunity detection only (never used to build tx)
+//   GET /ultra/v1/build — real swap instructions, ALT resolution, Metis routing
 //   Atomic VersionedTransaction v0: FlashBorrow + Swap1 + Swap2 + FlashRepay + Tip
 //   Flash loans via Solend (0.09% fee) + Jito bundle submission
 //
@@ -249,16 +249,16 @@ async fn main() -> Result<()> {
     };
 
     // ── Jupiter Swap V2 API client ─────────────────────────────────────────────
-    // GET /swap/v2/order — detect_opportunity (detection only, never for tx building)
-    // GET /swap/v2/build — get_build_instructions (real atomic swap instructions)
+    // GET /ultra/v1/order — detect_opportunity (detection only, never for tx building)
+    // GET /ultra/v1/build — get_build_instructions (real atomic swap instructions)
     //
     // FORBIDDEN: /ultra/v1/*  |  /swap/v1/*  |  /swap-instructions  |  lite-api.jup.ag
     let jup_v2_client = build_swap_v2_client()
         .context("Failed to build Jupiter Swap V2 HTTP client")?;
     let tip_calculator = TipCalculator::new();
     info!(
-        endpoint_order = "https://api.jup.ag/swap/v2/order",
-        endpoint_build = "https://api.jup.ag/swap/v2/build",
+        endpoint_order = "https://api.jup.ag/ultra/v1/order",
+        endpoint_build = "https://api.jup.ag/ultra/v1/build",
         has_key        = config.jupiter_api_key.is_some(),
         "Jupiter Swap V2 client ready (GET /order for detection, GET /build for execution)"
     );

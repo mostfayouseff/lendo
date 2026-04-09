@@ -20,9 +20,7 @@ pub mod filter;
 pub mod helius_ws;
 pub mod jupiter;
 pub mod shredstream;
-pub mod swap_builder; // retained for v0 transaction utilities
 pub mod swap_v2;
-pub mod ultra;        // retained for token metadata utilities only
 pub mod yellowstone;
 
 pub use detection::{

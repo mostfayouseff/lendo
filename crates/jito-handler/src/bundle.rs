@@ -33,7 +33,7 @@
 //   Using base64 here would cause silent rejection at the block engine.
 // =============================================================================
 
-use super::TipCalculator;
+use crate::tip_strategy::TipStrategy;
 use crate::keypair::{extract_message_bytes, inject_signature, ApexKeypair};
 use crate::rpc::SolanaRpcClient;
 use anyhow::Context;
@@ -77,6 +77,7 @@ pub enum JitoError {
     Submission(String),
     #[error("Bundle rejected by block engine: {0}")]
     Rejected(String),
+    // TipError retained for forward-compatibility; no longer emitted internally.
     #[error("Tip calculation failed: {0}")]
     TipError(String),
     #[error("RPC error: {0}")]
@@ -174,7 +175,7 @@ enum InflightStatus {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 pub struct JitoBundleHandler {
-    tip_calculator: TipCalculator,
+    tip_strategy: TipStrategy,
     engine_url: String,
     http_client: Client,
     rpc_client: Option<Arc<SolanaRpcClient>>,
@@ -191,7 +192,7 @@ impl JitoBundleHandler {
             .expect("Failed to build Jito HTTP client");
 
         Self {
-            tip_calculator: TipCalculator::new(),
+            tip_strategy: TipStrategy::new(),
             engine_url,
             http_client,
             rpc_client: None,
@@ -214,7 +215,7 @@ impl JitoBundleHandler {
             .context("Failed to build Solana RPC client")?;
 
         Ok(Self {
-            tip_calculator: TipCalculator::new(),
+            tip_strategy: TipStrategy::new(),
             engine_url,
             http_client,
             rpc_client: Some(Arc::new(rpc_client)),
@@ -228,10 +229,7 @@ impl JitoBundleHandler {
         swap_payloads: Vec<Vec<u8>>,
         expected_profit_lamports: u64,
     ) -> Result<JitoBundle, JitoError> {
-        let tip = self
-            .tip_calculator
-            .compute_tip(expected_profit_lamports)
-            .map_err(|e| JitoError::TipError(e.to_string()))?;
+        let tip = self.tip_strategy.compute_tip(expected_profit_lamports);
 
         // Select tip account at random — Jito spec requirement to reduce contention
         let tip_account = select_random_tip_account();

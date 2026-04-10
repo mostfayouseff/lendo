@@ -317,6 +317,13 @@ impl JupiterMonitor {
         let ids_param = ids.join(",");
         let url = format!("https://api.jup.ag/price/v3?ids={}", ids_param);
 
+        info!(
+            url         = %url,
+            tokens      = TOKENS.len(),
+            has_api_key = api_key.is_some(),
+            "► SENDING GET /price/v3 — Jupiter price monitor poll"
+        );
+
         let mut req = client
             .get(&url)
             .header("accept", "application/json");
@@ -326,9 +333,15 @@ impl JupiterMonitor {
         }
 
         let resp = req.send().await?;
+        let status = resp.status();
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        info!(
+            http_status = %status,
+            url         = %url,
+            "◄ RESPONSE GET /price/v3 — HTTP status received"
+        );
+
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "Jupiter v3 HTTP {}: {}",

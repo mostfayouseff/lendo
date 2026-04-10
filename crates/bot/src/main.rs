@@ -344,6 +344,7 @@ async fn main() -> Result<()> {
     );
 
     let mut live_edges: Option<Vec<common::types::MarketEdge>> = None;
+    let mut live_prices_ever_received = false;
     let mut iteration: u64 = 0;
     let mut last_stats_report = std::time::Instant::now();
     const STATS_REPORT_INTERVAL_SECS: u64 = 60;
@@ -374,11 +375,20 @@ async fn main() -> Result<()> {
 
         // ── Absorb Jupiter price updates ───────────────────────────────────
         while let Ok(edges) = jupiter_rx.try_recv() {
-            info!(
-                edges  = edges.len(),
-                source = "JUPITER/LIVE",
-                "LIVE DATA SOURCE: JUPITER — price matrix updated"
-            );
+            if !live_prices_ever_received {
+                live_prices_ever_received = true;
+                info!(
+                    edges          = edges.len(),
+                    source         = "JUPITER/LIVE",
+                    "★ FIRST LIVE PRICES RECEIVED — execution pipeline UNBLOCKED (live_edges gate cleared)"
+                );
+            } else {
+                info!(
+                    edges  = edges.len(),
+                    source = "JUPITER/LIVE",
+                    "LIVE DATA SOURCE: JUPITER — price matrix updated"
+                );
+            }
             live_edges = Some(edges);
         }
 
@@ -412,13 +422,14 @@ async fn main() -> Result<()> {
                 match live_edges.as_deref() {
                     Some(live) if !live.is_empty() => (live, "JUPITER/LIVE"),
                     _ => {
-                        // No live prices yet — skip this iteration and wait
-                        // We do NOT fall back to mock edges in live mode
-                        if iteration % 500 == 0 {
+                        // No live prices yet — skip this iteration and wait.
+                        // Gate clears as soon as JupiterMonitor delivers its first batch.
+                        if iteration % 50 == 0 {
                             warn!(
                                 iteration,
-                                "No live price data yet — waiting for Jupiter price monitor. \
-                                 Bot will execute as soon as live prices arrive."
+                                live_prices_ever_received,
+                                "BLOCKED: no live price data — waiting for Jupiter Price API \
+                                 (https://api.jup.ag/price/v3). Execution begins as soon as prices arrive."
                             );
                         }
                         tokio::task::yield_now().await;
@@ -444,6 +455,30 @@ async fn main() -> Result<()> {
 
             let n_approved = approved_trades.len();
             metrics.paths_profitable.inc_by(n_approved as f64);
+
+            // ── Pipeline probe: log strategy results periodically ────────────
+            if n_approved == 0 {
+                if iteration % 100 == 0 {
+                    info!(
+                        iteration,
+                        matrix_μs  = matrix_us,
+                        evaluate_μs = rich_us,
+                        edges      = edges_ref.len(),
+                        source     = edge_source,
+                        "PIPELINE STAGE 2: strategy found 0 approved trades this cycle"
+                    );
+                }
+            } else {
+                info!(
+                    iteration,
+                    n_approved,
+                    matrix_μs  = matrix_us,
+                    evaluate_μs = rich_us,
+                    source     = edge_source,
+                    "PIPELINE STAGE 2: strategy found {} approved trade(s) — selecting best",
+                    n_approved
+                );
+            }
 
             // ── Execution queue: pick only the BEST opportunity per cycle ─────
             // Sending multiple bundles at once causes Jito 429 errors (1 req/sec limit).
@@ -604,7 +639,13 @@ async fn main() -> Result<()> {
                         .unwrap_or_default();
 
                     if operator_pubkey.is_empty() {
-                        warn!(iteration, "No operator keypair — skipping live trade");
+                        warn!(
+                            iteration,
+                            keypair_path = %config.keypair_path,
+                            flash_loan_enabled = config.flash_loan_enabled,
+                            "EXECUTION BLOCKED: no operator keypair (flash_keypair is None). \
+                             Ensure live-key.json exists and APEX_FLASH_LOAN_ENABLED=true. Skipping."
+                        );
                         continue;
                     }
 
@@ -628,6 +669,13 @@ async fn main() -> Result<()> {
                     let active_slippage = self_optimizer.params().slippage_bps;
 
                     // ── Step 2: GET /order — confirm profitability (detection only) ────────
+                    info!(
+                        iteration,
+                        leg1 = format!("{} → {}", &leg1_in[..8.min(leg1_in.len())], &leg1_out[..8.min(leg1_out.len())]),
+                        position_lamports = trade.position_lamports,
+                        operator = &operator_pubkey[..8.min(operator_pubkey.len())],
+                        "PIPELINE STAGE 3: calling GET /swap/v2/order (detect_opportunity)"
+                    );
                     let order_quote = match detect_opportunity(
                         &jup_v2_client,
                         &leg1_in,
@@ -663,6 +711,14 @@ async fn main() -> Result<()> {
                     // ── Steps 3 & 4: GET /build — both legs in PARALLEL ──────────────────
                     // Fetching sequentially doubled the execution latency.
                     // tokio::join! fires both requests simultaneously.
+                    info!(
+                        iteration,
+                        leg1_in  = %leg1_in,
+                        leg2_in  = %leg2_in,
+                        borrow_lamports,
+                        expected_mid = expected_mid_amount,
+                        "PIPELINE STAGE 4: firing parallel GET /swap/v2/build for leg1 + leg2"
+                    );
                     let (build1_result, build2_result) = tokio::join!(
                         get_build_instructions(
                             &jup_v2_client,
@@ -800,6 +856,7 @@ async fn main() -> Result<()> {
                     }
 
                     info!(
+                        iteration,
                         tx_bytes     = tx_bytes.len(),
                         borrow_sol   = format!("{:.6}", borrow_lamports as f64 / 1e9),
                         repay_sol    = format!("{:.6}", repay_lamports  as f64 / 1e9),
@@ -808,7 +865,7 @@ async fn main() -> Result<()> {
                         tip_frac_pct = format!("{:.1}%", tip_strategy.tip_fraction_pct()),
                         blockhash    = %blockhash,
                         path         = %dex_path,
-                        "Atomic v0 transaction built — submitting to Jito"
+                        "PIPELINE STAGE 5: atomic v0 tx built — on-chain simulation PASSED — submitting to Jito"
                     );
 
                     // ── Step 9: Submit to Jito bundle engine ─────────────────────────────

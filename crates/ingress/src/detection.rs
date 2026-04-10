@@ -20,7 +20,7 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub const SWAP_V2_BASE: &str = "https://api.jup.ag/swap/v2";
 const ORDER_TIMEOUT_MS: u64 = 6_000;
@@ -137,7 +137,15 @@ pub async fn detect_opportunity(
         SWAP_V2_BASE, input_mint, output_mint, amount, slippage_bps
     );
 
-    debug!(input_mint, output_mint, amount, slippage_bps, "GET /order — detecting opportunity");
+    info!(
+        url          = %url,
+        input_mint,
+        output_mint,
+        amount,
+        slippage_bps,
+        has_api_key  = api_key.is_some(),
+        "► SENDING GET /swap/v2/order — opportunity detection request"
+    );
 
     let mut req = client.get(&url).header("accept", "application/json");
     if let Some(key) = api_key {
@@ -146,6 +154,12 @@ pub async fn detect_opportunity(
 
     let resp = req.send().await?;
     let status = resp.status();
+
+    info!(
+        status = %status,
+        url    = %url,
+        "◄ RESPONSE GET /swap/v2/order — HTTP status received"
+    );
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();

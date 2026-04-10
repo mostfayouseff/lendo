@@ -187,13 +187,15 @@ pub async fn get_build_instructions(
         SWAP_V2_BASE, input_mint, output_mint, amount, user_pubkey, slippage_bps
     );
 
-    debug!(
+    info!(
+        url          = %url,
         input_mint,
         output_mint,
         amount,
         user_pubkey,
         slippage_bps,
-        "GET /build — fetching atomic swap instructions"
+        has_api_key  = api_key.is_some(),
+        "► SENDING GET /swap/v2/build — atomic instruction request"
     );
 
     let mut req = client
@@ -207,6 +209,12 @@ pub async fn get_build_instructions(
 
     let resp = req.send().await?;
     let status = resp.status();
+
+    info!(
+        status = %status,
+        url    = %url,
+        "◄ RESPONSE GET /swap/v2/build — HTTP status received"
+    );
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();

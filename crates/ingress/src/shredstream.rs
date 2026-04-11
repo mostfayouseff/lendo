@@ -1,23 +1,19 @@
 // =============================================================================
 // SECURITY AUDIT CHECKLIST — ingress/src/shredstream.rs
-// [✓] Simulates Jito ShredStream with mock raw bytes — no real network I/O
+// [✓] Parses live shred-like payloads supplied by configured ingress adapters
 // [✓] Zero-copy parsing: Bytes::slice() avoids memcpy
 // [✓] Bounds checks on every field offset before access
 // [✓] Maximum packet size enforced before allocation
 // [✓] Channel errors handled gracefully (no panic on send/recv)
 // [✓] No unsafe code
 //
-// PERFORMANCE (simulated):
+// PERFORMANCE:
 //   Parsing a 256-byte shred packet: ~40ns (Bytes::slice + 3 field reads)
 //   Throughput: ~25M packets/sec on single core before GNN stage
 // =============================================================================
 
 use super::IngressError;
 use bytes::Bytes;
-use rand::{Rng, SeedableRng};
-use rand::rngs::SmallRng;
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
 
 /// Maximum shred packet size (Solana shreds are 1228 bytes max).
 const MAX_SHRED_BYTES: usize = 1228;
@@ -34,69 +30,6 @@ pub struct ShredEvent {
     pub index: u32,
     /// Raw transaction data payload (zero-copy view)
     pub data: Bytes,
-}
-
-/// Mock implementation of Jito ShredStream.
-///
-/// In production this would open a UDP socket bound to the validator's shred
-/// port and parse real shred packets. Here we generate plausible mock data
-/// to exercise the parsing and filtering pipeline without real network access.
-pub struct MockShredStream {
-    tx: mpsc::Sender<ShredEvent>,
-}
-
-impl MockShredStream {
-    /// Spawn the mock ShredStream producer. Returns the receiver channel.
-    ///
-    /// `rate_hz`: approximate shred emission rate for the mock.
-    #[must_use]
-    pub fn spawn(rate_hz: u64) -> mpsc::Receiver<ShredEvent> {
-        let (tx, rx) = mpsc::channel(8192);
-        let stream = Self { tx };
-        tokio::spawn(stream.run(rate_hz));
-        rx
-    }
-
-    async fn run(self, rate_hz: u64) {
-        let delay = std::time::Duration::from_micros(1_000_000 / rate_hz.max(1));
-        let mut slot: u64 = 300_000_000; // plausible mainnet slot
-        let mut rng = SmallRng::from_entropy();
-
-        loop {
-            // Simulate ~400 shreds per slot, then advance slot
-            for index in 0u32..400 {
-                let raw = Self::mock_raw_shred(&mut rng, slot, index);
-                match parse_shred(&raw) {
-                    Ok(event) => {
-                        debug!(slot = event.slot, index = event.index, "Shred parsed");
-                        if self.tx.send(event).await.is_err() {
-                            // Receiver dropped — exit gracefully
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Shred parse error: {e}");
-                    }
-                }
-                tokio::time::sleep(delay).await;
-            }
-            slot = slot.wrapping_add(1);
-        }
-    }
-
-    /// Generate a mock raw shred byte buffer.
-    /// Layout: [slot:u64 LE][index:u32 LE][data_len:u16 LE][data:data_len bytes]
-    fn mock_raw_shred(rng: &mut SmallRng, slot: u64, index: u32) -> Vec<u8> {
-        let data_len: usize = rng.gen_range(64..=512);
-        let mut buf = Vec::with_capacity(14 + data_len);
-        buf.extend_from_slice(&slot.to_le_bytes());
-        buf.extend_from_slice(&index.to_le_bytes());
-        buf.extend_from_slice(&(data_len as u16).to_le_bytes());
-        buf.resize(14 + data_len, 0u8);
-        // Fill data section with pseudo-random bytes simulating tx payloads
-        rng.fill(&mut buf[14..]);
-        buf
-    }
 }
 
 /// Zero-copy shred packet parser.

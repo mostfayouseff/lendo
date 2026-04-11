@@ -17,6 +17,7 @@
 // =============================================================================
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -75,6 +76,23 @@ struct SlotResult(u64);
 #[derive(Deserialize, Debug)]
 struct BalanceResult {
     value: u64,
+}
+
+#[derive(Deserialize, Debug)]
+struct AccountInfoResult {
+    value: Option<AccountInfoValue>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AccountInfoValue {
+    owner: String,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountHealth {
+    pub owner: String,
+    pub data_len: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -200,6 +218,36 @@ impl SolanaRpcClient {
             "Balance fetched"
         );
         Ok(result.value)
+    }
+
+    pub async fn get_account_health(&self, pubkey_b58: &str) -> Result<AccountHealth> {
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            id: 7,
+            method: "getAccountInfo",
+            params: serde_json::json!([
+                pubkey_b58,
+                {"commitment": "confirmed", "encoding": "base64"}
+            ]),
+        };
+
+        let result = self.post::<AccountInfoResult>(&request).await?;
+        let value = result
+            .value
+            .ok_or_else(|| anyhow::anyhow!("account {pubkey_b58} not found on-chain"))?;
+        let data_len = value
+            .data
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+
+        Ok(AccountHealth {
+            owner: value.owner,
+            data_len,
+        })
     }
 
     /// Simulate a base64-encoded transaction and return whether it would succeed.

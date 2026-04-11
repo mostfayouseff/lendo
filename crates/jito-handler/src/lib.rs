@@ -6,7 +6,7 @@
 // [✓] No panics — all errors are JitoError variants
 // [✓] No unsafe code
 // [✓] flash_tx:    real atomic Solend borrow+swap+repay transaction builder
-// [✓] flash_tx_v2: VersionedTransaction v0 builder for Jupiter Swap V2 API
+// [✓] transaction: signs Jupiter Ultra transactions and appends Jito tip instruction
 // =============================================================================
 
 #![deny(clippy::all)]
@@ -20,6 +20,7 @@ pub mod keypair;
 pub mod rpc;
 pub mod tip_calculator;
 pub mod tip_strategy;
+pub mod transaction;
 
 pub use adaptive_cooldown::{AdaptiveCooldown, SubmitOutcome};
 pub use bundle::{JitoBundle, JitoBundleHandler, select_random_tip_account};
@@ -30,3 +31,4 @@ pub use flash_tx_v2::{
 pub use keypair::ApexKeypair;
 pub use rpc::SolanaRpcClient;
 pub use tip_strategy::{TipOutcome, TipStrategy};
+pub use transaction::{attach_jito_tip_and_sign, SignedTipTransaction};

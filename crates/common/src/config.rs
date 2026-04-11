@@ -36,8 +36,8 @@ pub struct ApexConfig {
     pub alchemy_api_key: Option<String>,
 
     // ── Jupiter ───────────────────────────────────────────────────────────────
-    /// Jupiter API key for authenticated price endpoints
-    /// Source: JUPITER_API_KEY env var (optional)
+    /// Jupiter API key for authenticated Jupiter Ultra order endpoint
+    /// Source: JUPITER_API_KEY env var (validated as required by the bot)
     pub jupiter_api_key: Option<String>,
 
     // ── Strategy ─────────────────────────────────────────────────────────────
@@ -60,6 +60,12 @@ pub struct ApexConfig {
     // ── Jito ─────────────────────────────────────────────────────────────────
     /// Jito block engine endpoint
     pub jito_url: String,
+
+    /// Jito tip account used for every sent swap transaction
+    pub jito_tip_account: String,
+
+    /// Configurable minimal tip amount in lamports
+    pub jito_tip_lamports: u64,
 
     // ── Risk ─────────────────────────────────────────────────────────────────
     /// Maximum drawdown before circuit breaker trips (in lamports)
@@ -124,6 +130,8 @@ impl ApexConfig {
             flash_loan_enabled: parse_env_bool("APEX_FLASH_LOAN_ENABLED", true)?,
             jito_url: optional_env("APEX_JITO_URL")
                 .unwrap_or_else(|| "https://mainnet.block-engine.jito.wtf".to_string()),
+            jito_tip_account: required_env("JITO_TIP_ACCOUNT")?,
+            jito_tip_lamports: parse_env_u64("JITO_TIP_LAMPORTS", 1_000)?,
             circuit_breaker_threshold_lamports: parse_env_u64(
                 "APEX_CB_THRESHOLD_LAMPORTS",
                 5_000_000_000,
@@ -147,6 +155,7 @@ impl ApexConfig {
             helius_active       = cfg.helius_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
             alchemy_active      = cfg.alchemy_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
             jupiter_key_active  = cfg.jupiter_api_key.is_some(),
+            jito_tip_lamports   = cfg.jito_tip_lamports,
             "ApexConfig loaded — LIVE TRADING MODE"
         );
 
@@ -158,6 +167,10 @@ impl ApexConfig {
 
 fn optional_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn required_env(key: &str) -> Result<String> {
+    optional_env(key).ok_or_else(|| anyhow::anyhow!("Missing required environment variable: {key}"))
 }
 
 fn parse_env_u64(key: &str, default: u64) -> Result<u64> {

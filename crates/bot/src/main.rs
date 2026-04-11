@@ -4,22 +4,18 @@
 // INGRESS PRIORITY:
 //   1. Helius WebSocket (PRIMARY)   — wss://mainnet.helius-rpc.com/?api-key=<KEY>
 //   2. Alchemy WebSocket (FALLBACK) — wss://solana-mainnet.g.alchemy.com/v2/<KEY>
-//   3. Mock stream (LAST RESORT)    — logged clearly, indicates no WS keys set
+//   Mock streams are disabled for production execution.
 //
-// PRICE DATA (self-healing):
-//   1. Jupiter Price v3 — https://api.jup.ag/price/v3?ids=...  (PRIMARY)
+// PRICE DATA:
+//   Jupiter Price API feeds the market matrix.
 //   2. CoinGecko public API                                     (FALLBACK)
 //   3. Stale cache                                              (LAST RESORT)
 //
-// EXECUTION — Jupiter Swap V2 API:
-//   GET /swap/v2/order — opportunity detection only (never used to build tx)
-//   GET /swap/v2/build — real swap instructions, ALT resolution, Metis routing
-//   Atomic VersionedTransaction v0: FlashBorrow + Swap1 + Swap2 + FlashRepay + Tip
-//   Flash loans via Solend (0.09% fee) + Jito bundle submission
-//
-// FORBIDDEN ENDPOINTS (never call these):
-//   /ultra/v1/*  |  /swap/v1/*  |  /swap-instructions  |  lite-api.jup.ag
-//   POST /execute
+// EXECUTION — Jupiter Ultra API:
+//   Base: https://api.jup.ag/ultra/v1/
+//   GET /order returns a quote plus unsigned transaction.
+//   The bot simulates that transaction, appends a configurable Jito tip
+//   instruction, signs, sends via Solana RPC, and waits for confirmation.
 //
 // LOGGING:
 //   "LIVE DATA SOURCE: HELIUS" — when Helius is active
@@ -35,20 +31,18 @@ use common::{ApexConfig, ApexMetrics};
 use apex_core::MatrixBuilder;
 use base64::Engine as _;
 use ingress::{
-    build_swap_v2_client, detect_opportunity, get_build_instructions,
+    build_ultra_client, request_ultra_order,
     AlchemyTransactionStream, HeliusTransactionStream,
-    JupiterMonitor, MockShredStream,
+    JupiterMonitor,
 };
 use jito_handler::{
-    build_atomic_flash_v0, select_random_tip_account, solend_repay_amount,
-    AdaptiveCooldown, AtomicAccountMeta, AtomicInstruction, ApexKeypair,
-    JitoBundleHandler, SolanaRpcClient, SubmitOutcome, TipOutcome, TipStrategy,
+    attach_jito_tip_and_sign, ApexKeypair, JitoBundleHandler, SolanaRpcClient,
+    AdaptiveCooldown, SubmitOutcome,
 };
 use pnl::{make_record, AtomicPnL, SessionStats};
 use risk_oracle::{AnomalyDetector, CircuitBreaker, SelfOptimizer, TradingParams};
 use safety::{AtomicRevertGuard, PreSimulator};
 use solana_program_apex::instruction::dex_fee_bps;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strategy::ArbitrageStrategy;
@@ -77,8 +71,9 @@ async fn main() -> Result<()> {
     // ── Configuration ─────────────────────────────────────────────────────────
     let config = ApexConfig::from_env()
         .context("Failed to load configuration — check env vars")?;
+    validate_required_environment(&config)?;
     info!(
-        stage = "[CONFIG LOADED]",
+        stage = "[CONFIG OK]",
         elapsed_ms = startup_trace.elapsed().as_millis(),
         simulation_only = config.simulation_only,
         rpc_url = %config.rpc_url,
@@ -87,6 +82,8 @@ async fn main() -> Result<()> {
         helius_configured = config.helius_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
         alchemy_configured = config.alchemy_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
         jupiter_configured = config.jupiter_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+        jito_tip_account = %config.jito_tip_account,
+        jito_tip_lamports = config.jito_tip_lamports,
         "Configuration loaded and validated"
     );
 
@@ -109,7 +106,7 @@ async fn main() -> Result<()> {
         Ok(rpc_check) => match rpc_check.get_slot().await {
             Ok(slot) => {
                 info!(
-                    stage = "[RPC CONNECTED]",
+                    stage = "[RPC OK]",
                     slot,
                     url = %config.http_rpc_url,
                     elapsed_ms = startup_trace.elapsed().as_millis(),
@@ -117,15 +114,11 @@ async fn main() -> Result<()> {
                 );
             }
             Err(e) => {
-                warn!(
-                    error = %e,
-                    url   = %config.http_rpc_url,
-                    "Solana RPC: getSlot FAILED — will retry in background. Continuing."
-                );
+                anyhow::bail!("Solana RPC getSlot failed for {}: {e}", config.http_rpc_url);
             }
         },
         Err(e) => {
-            warn!(error = %e, "Solana RPC: client init failed — continuing anyway");
+            anyhow::bail!("Solana RPC client init failed: {e}");
         }
     }
 
@@ -185,12 +178,11 @@ async fn main() -> Result<()> {
         "Self-optimizer initialised"
     );
 
-    // ── Flash loans ────────────────────────────────────────────────────────────
-    // Flash loan instructions are assembled inline per trade via flash_tx_v2.
-    // Solend charges 0.09% (9 bps) per borrow; fee is calculated with solend_repay_amount().
+    // ── Execution capital ──────────────────────────────────────────────────────
+    // Jupiter Ultra returns the executable swap transaction for the operator wallet.
     if config.flash_loan_enabled {
         info!(
-            "Flash loans: ENABLED (Solend, 9bps fee) — assembled atomically per trade via flash_tx_v2"
+            "Flash loan flag is enabled, but live trade construction is delegated to Jupiter Ultra orders"
         );
     }
 
@@ -221,51 +213,26 @@ async fn main() -> Result<()> {
     // ── Jito handler ───────────────────────────────────────────────────────────
     let flash_keypair: Option<Arc<ApexKeypair>>;
 
-    let jito = if config.simulation_only {
-        info!("Jito: SIMULATION mode — bundles logged but NOT submitted");
-        flash_keypair = None;
-        JitoBundleHandler::new(config.jito_url.clone())
-    } else {
+    let jito = {
         info!("Jito: LIVE mode — loading keypair from {}", config.keypair_path);
         let keypair = ApexKeypair::load(&config.keypair_path).with_context(|| {
             format!("Failed to load keypair from {} — ensure the file exists", config.keypair_path)
         })?;
 
-        // Log wallet balance — informational only, NOT a gate
-        if let Ok(rpc) = jito_handler::SolanaRpcClient::new(&config.http_rpc_url) {
-            match rpc.get_balance(&keypair.pubkey_b58).await {
-                Ok(bal) => {
-                    info!(
-                        pubkey  = %keypair.pubkey_b58,
-                        balance = format!("{:.9} SOL ({} lamports)", bal as f64 / 1e9, bal),
-                        "Operator wallet: balance logged — flash loans do NOT require pre-funded balance"
-                    );
-                    if bal < 5_000_000 {
-                        warn!(
-                            balance_lamports = bal,
-                            "Operator wallet balance is low (< 0.005 SOL) — ensure enough for transaction fees. Flash loan capital is borrowed atomically."
-                        );
-                    }
-                }
-                Err(e) => warn!("Could not fetch operator balance: {e} — continuing"),
-            }
-        }
+        let rpc = jito_handler::SolanaRpcClient::new(&config.http_rpc_url)?;
+        let bal = rpc.get_balance(&keypair.pubkey_b58).await?;
+        info!(
+            stage = "[WALLET OK]",
+            pubkey  = %keypair.pubkey_b58,
+            balance = format!("{:.9} SOL ({} lamports)", bal as f64 / 1e9, bal),
+            "Operator wallet balance loaded"
+        );
+        enforce_wallet_balance(bal, config.jito_tip_lamports)?;
 
-        // Load flash loan keypair
-        let fkp = if config.flash_loan_enabled {
-            match ApexKeypair::load(&config.keypair_path) {
-                Ok(kp) => {
-                    info!(pubkey = %kp.pubkey_b58, "Flash loan signing keypair loaded");
-                    Some(Arc::new(kp))
-                }
-                Err(e) => {
-                    warn!(error = %e, "Flash loan keypair load failed — flash loans disabled for this session");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let health = rpc.get_account_health(&keypair.pubkey_b58).await?;
+        enforce_system_wallet(&health.owner, health.data_len)?;
+
+        let fkp = Some(Arc::new(ApexKeypair::load(&config.keypair_path)?));
         flash_keypair = fkp;
 
         JitoBundleHandler::new_live(
@@ -276,18 +243,13 @@ async fn main() -> Result<()> {
         .context("Failed to initialise live Jito handler")?
     };
 
-    // ── Jupiter Swap V2 API client ─────────────────────────────────────────────
-    // GET /swap/v2/order — detect_opportunity (detection only, never for tx building)
-    // GET /swap/v2/build — get_build_instructions (real atomic swap instructions)
-    //
-    // FORBIDDEN: /ultra/v1/*  |  /swap/v1/*  |  /swap-instructions  |  lite-api.jup.ag
-    let jup_v2_client = build_swap_v2_client()
-        .context("Failed to build Jupiter Swap V2 HTTP client")?;
+    // ── Jupiter Ultra API client ───────────────────────────────────────────────
+    let jup_ultra_client = build_ultra_client()
+        .context("Failed to build Jupiter Ultra HTTP client")?;
     info!(
-        endpoint_order = "https://api.jup.ag/swap/v2/order",
-        endpoint_build = "https://api.jup.ag/swap/v2/build",
+        endpoint_order = "https://api.jup.ag/ultra/v1/order",
         has_key        = config.jupiter_api_key.is_some(),
-        "Jupiter Swap V2 client ready (GET /order for detection, GET /build for execution)"
+        "Jupiter Ultra client ready"
     );
 
     // ── Hot-path RPC client — created ONCE and reused across all trade cycles ───
@@ -318,7 +280,7 @@ async fn main() -> Result<()> {
     }
 
     // ── Ingress streams ────────────────────────────────────────────────────────
-    // Priority: Helius (PRIMARY) → Alchemy (FALLBACK) → Mock (LAST RESORT)
+    // Priority: Helius (PRIMARY) → Alchemy (FALLBACK). Mock mode is disabled.
     let ingress_source: &str;
     let mut shred_rx: Receiver<ShredEvent> =
         if let Some(ref helius_key) = config.helius_api_key {
@@ -331,9 +293,7 @@ async fn main() -> Result<()> {
                 );
                 HeliusTransactionStream::spawn(helius_key.clone())
             } else {
-                ingress_source = "MOCK (no Helius key)";
-                warn!("Helius API key is empty — using MockShredStream. Set HELIUS_API_KEY for live data.");
-                MockShredStream::spawn(400)
+                anyhow::bail!("HELIUS_API_KEY is empty; live execution does not allow mock ingress")
             }
         } else if let Some(ref alchemy_key) = config.alchemy_api_key {
             if !alchemy_key.is_empty() {
@@ -345,17 +305,10 @@ async fn main() -> Result<()> {
                 );
                 AlchemyTransactionStream::spawn(alchemy_key.clone())
             } else {
-                ingress_source = "MOCK (no WS keys)";
-                warn!("No Helius or Alchemy API keys set — using MockShredStream. Set HELIUS_API_KEY for live data.");
-                MockShredStream::spawn(400)
+                anyhow::bail!("ALCHEMY_API_KEY is empty; live execution does not allow mock ingress")
             }
         } else {
-            ingress_source = "MOCK (no WS keys configured)";
-            warn!(
-                "HELIUS_API_KEY and ALCHEMY_API_KEY not set — using MockShredStream. \
-                 Set HELIUS_API_KEY for live mainnet DEX event stream."
-            );
-            MockShredStream::spawn(400)
+            anyhow::bail!("HELIUS_API_KEY or ALCHEMY_API_KEY is required; live execution does not allow mock ingress")
         };
 
     info!(ingress = ingress_source, "Ingress stream configured");
@@ -391,10 +344,6 @@ async fn main() -> Result<()> {
     // Learns from Jito outcomes: backs off on 429s, tightens on successes.
     // Dead-market detection: 10 consecutive 429s → pause for 5–15 seconds.
     let mut adaptive_cooldown = AdaptiveCooldown::new();
-
-    // ── Adaptive tip strategy — replaces static TipCalculator ────────────────
-    // Starts at 30% of profit; increases tip fraction on rejection, decreases on acceptance.
-    let mut tip_strategy = TipStrategy::new();
 
     // Deduplication set — prevents sending the same arbitrage path twice.
     // Bounded to 64 entries; cleared when full.
@@ -675,20 +624,6 @@ async fn main() -> Result<()> {
                     record.log_summary();
                     guard.commit();
                 } else {
-                    // ── LIVE TRADING: Jupiter Swap V2 atomic pipeline ──────────────────────
-                    //
-                    // Step 1: GET /order  — confirm profitability (detection only)
-                    // Step 2: GET /build  — swap leg 1 instructions (SOL → token)
-                    // Step 3: GET /build  — swap leg 2 instructions (token → SOL)
-                    // Step 4: build_atomic_flash_v0 — assemble atomic VersionedTransaction v0
-                    //         [ComputeBudget][FlashBorrow][Swap1][Swap2][FlashRepay][JitoTip]
-                    // Step 5: Submit to Jito as MEV bundle
-                    //
-                    // FORBIDDEN: /ultra/v1/* | /swap/v1/* | /swap-instructions | lite-api.jup.ag
-
-                    // ── Step 1: Extract mints from arb path ──────────────────────────────
-                    // leg1: edge[0].from (SOL) → intermediate token
-                    // leg2: intermediate token → edge[0].from (SOL)
                     let operator_pubkey: String = flash_keypair
                         .as_ref()
                         .map(|kp| kp.pubkey_b58.clone())
@@ -698,156 +633,27 @@ async fn main() -> Result<()> {
                         warn!(
                             iteration,
                             keypair_path = %config.keypair_path,
-                            flash_loan_enabled = config.flash_loan_enabled,
                             "EXECUTION BLOCKED: no operator keypair (flash_keypair is None). \
-                             Ensure live-key.json exists and APEX_FLASH_LOAN_ENABLED=true. Skipping."
+                             Ensure live-key.json exists. Skipping."
                         );
                         continue;
                     }
 
-                    let leg1_in: Option<String> = trade.path.edges.first()
+                    let input_mint: Option<String> = trade.path.edges.first()
                         .map(|e| bs58::encode(e.from.0).into_string());
-                    let leg1_out: Option<String> = trade.path.edges.get(1)
+                    let output_mint: Option<String> = trade.path.edges.get(1)
                         .map(|e| bs58::encode(e.to.0).into_string())
                         .or_else(|| trade.path.edges.last()
                             .map(|e| bs58::encode(e.to.0).into_string()));
 
-                    let (leg1_in, leg1_out) = match (leg1_in, leg1_out) {
+                    let (input_mint, output_mint) = match (input_mint, output_mint) {
                         (Some(a), Some(b)) if a != b => (a, b),
                         _ => {
                             warn!(iteration, "Could not extract valid mints from arb path");
                             continue;
                         }
                     };
-                    let leg2_in  = leg1_out.clone(); // intermediate → SOL
-                    let leg2_out = leg1_in.clone();  // back to SOL
 
-                    let active_slippage = self_optimizer.params().slippage_bps;
-
-                    // ── Step 2: GET /order — confirm profitability (detection only) ────────
-                    info!(
-                        stage = "[BUILD TX]",
-                        iteration,
-                        leg1 = format!("{} → {}", &leg1_in[..8.min(leg1_in.len())], &leg1_out[..8.min(leg1_out.len())]),
-                        position_lamports = trade.position_lamports,
-                        operator = &operator_pubkey[..8.min(operator_pubkey.len())],
-                        "PIPELINE STAGE 3: calling GET /swap/v2/order (detect_opportunity)"
-                    );
-                    let order_quote = match detect_opportunity(
-                        &jup_v2_client,
-                        &leg1_in,
-                        &leg1_out,
-                        trade.position_lamports,
-                        active_slippage,
-                        config.jupiter_api_key.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(q) => q,
-                        Err(e) => {
-                            warn!(error = %e, path = %dex_path, "GET /order failed — skipping");
-                            continue;
-                        }
-                    };
-
-                    let active_min_profit = self_optimizer.params().min_profit_lamports;
-                    if !order_quote.is_profitable(active_min_profit) {
-                        warn!(
-                            profit       = order_quote.expected_profit_lamports(),
-                            min_required = active_min_profit,
-                            impact_pct   = order_quote.price_impact_pct,
-                            "GET /order: opportunity not profitable — skipping"
-                        );
-                        continue;
-                    }
-
-                    let borrow_lamports     = trade.position_lamports;
-                    let repay_lamports      = solend_repay_amount(borrow_lamports);
-                    let expected_mid_amount = order_quote.out_amount;
-
-                    // ── Steps 3 & 4: GET /build — both legs in PARALLEL ──────────────────
-                    // Fetching sequentially doubled the execution latency.
-                    // tokio::join! fires both requests simultaneously.
-                    info!(
-                        iteration,
-                        leg1_in  = %leg1_in,
-                        leg2_in  = %leg2_in,
-                        borrow_lamports,
-                        expected_mid = expected_mid_amount,
-                        "PIPELINE STAGE 4: firing parallel GET /swap/v2/build for leg1 + leg2"
-                    );
-                    let (build1_result, build2_result) = tokio::join!(
-                        get_build_instructions(
-                            &jup_v2_client,
-                            &config.http_rpc_url,
-                            &leg1_in,
-                            &leg1_out,
-                            borrow_lamports,
-                            &operator_pubkey,
-                            active_slippage,
-                            config.jupiter_api_key.as_deref(),
-                        ),
-                        get_build_instructions(
-                            &jup_v2_client,
-                            &config.http_rpc_url,
-                            &leg2_in,
-                            &leg2_out,
-                            expected_mid_amount,
-                            &operator_pubkey,
-                            active_slippage,
-                            config.jupiter_api_key.as_deref(),
-                        )
-                    );
-                    let build1 = match build1_result {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!(error = %e, "GET /build leg1 failed — skipping");
-                            continue;
-                        }
-                    };
-                    let build2 = match build2_result {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!(error = %e, "GET /build leg2 failed — skipping");
-                            continue;
-                        }
-                    };
-
-                    // ── Step 5: Convert V2 instructions to AtomicInstruction ──────────────
-                    let compute_budget_ixs = match to_atomic_ixs(&build1.compute_budget_instructions) {
-                        Ok(v) => v,
-                        Err(e) => { warn!(error = %e, "compute_budget decode failed"); continue; }
-                    };
-                    let swap1_ixs = match to_atomic_ixs(&build1.swap_only_instructions()) {
-                        Ok(v) => v,
-                        Err(e) => { warn!(error = %e, "swap1 decode failed"); continue; }
-                    };
-                    let swap2_ixs = match to_atomic_ixs(&build2.swap_only_instructions()) {
-                        Ok(v) => v,
-                        Err(e) => { warn!(error = %e, "swap2 decode failed"); continue; }
-                    };
-
-                    // Merge ALT maps from both swap legs
-                    let mut combined_alts: HashMap<String, Vec<String>> = build1.alt_map.clone();
-                    for (k, v) in &build2.alt_map {
-                        combined_alts.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-
-                    // ── Jito tip (adaptive — learns from submission outcomes) ─────────────
-                    let profit_u64 = order_quote.expected_profit_lamports().max(0) as u64;
-                    let swap_tip_lamports = tip_strategy.compute_tip(profit_u64);
-                    let jito_tip_account  = select_random_tip_account();
-
-                    // ── Step 6: Fetch latest blockhash (reused hot_rpc — no reconnection) ─
-                    let blockhash = match hot_rpc.get_latest_blockhash().await {
-                        Ok(bh) => bh.blockhash,
-                        Err(e) => {
-                            warn!(error = %e, "Blockhash fetch failed — skipping");
-                            continue;
-                        }
-                    };
-
-                    // ── Step 7: Build atomic VersionedTransaction v0 ─────────────────────
                     let fkp = match flash_keypair.as_ref() {
                         Some(k) => k,
                         None => {
@@ -856,99 +662,170 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    let tx_bytes = match build_atomic_flash_v0(
-                        fkp,
-                        &blockhash,
-                        borrow_lamports,
-                        repay_lamports,
-                        &compute_budget_ixs,
-                        &swap1_ixs,
-                        &swap2_ixs,
-                        &combined_alts,
-                        swap_tip_lamports,
-                        &jito_tip_account,
-                    ) {
-                        Ok(b) => b,
+                    let wallet_balance = match hot_rpc.get_balance(&operator_pubkey).await {
+                        Ok(balance) => balance,
                         Err(e) => {
-                            warn!(stage = "[ERROR]", error = %e, "build_atomic_flash_v0 failed — skipping");
+                            warn!(stage = "[ERROR]", error = %e, "Wallet balance check failed — skipping cycle");
+                            continue;
+                        }
+                    };
+                    if let Err(e) = enforce_wallet_balance(wallet_balance, config.jito_tip_lamports) {
+                        warn!(stage = "[ERROR]", error = %e, wallet_balance, "Wallet safety gate failed");
+                        continue;
+                    }
+
+                    info!(
+                        stage = "[BUILD TX]",
+                        iteration,
+                        input_mint = %input_mint,
+                        output_mint = %output_mint,
+                        amount = trade.position_lamports,
+                        operator = %operator_pubkey,
+                        "Requesting Jupiter Ultra order"
+                    );
+                    let jupiter_key = match config.jupiter_api_key.as_deref() {
+                        Some(key) => key,
+                        None => {
+                            warn!(stage = "[ERROR]", "JUPITER_API_KEY missing — skipping cycle");
+                            continue;
+                        }
+                    };
+                    let ultra_order = match request_ultra_order(
+                        &jup_ultra_client,
+                        &input_mint,
+                        &output_mint,
+                        trade.position_lamports,
+                        &operator_pubkey,
+                        jupiter_key,
+                    ).await {
+                        Ok(order) => order,
+                        Err(e) => {
+                            warn!(
+                                stage = "[ERROR]",
+                                error = %e,
+                                iteration,
+                                "Jupiter Ultra order failed — stopping this cycle"
+                            );
+                            let is_rate_limit = e.to_string().contains("429")
+                                || e.to_string().to_lowercase().contains("rate");
+                            if is_rate_limit {
+                                adaptive_cooldown.record_outcome(SubmitOutcome::RateLimit);
+                            } else {
+                                adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
+                            }
+                            continue;
+                        }
+                    };
+
+                    let required_lamports = ultra_order
+                        .required_fee_lamports()
+                        .saturating_add(config.jito_tip_lamports)
+                        .saturating_add(10_000);
+                    if wallet_balance < required_lamports {
+                        warn!(
+                            stage = "[ERROR]",
+                            wallet_balance,
+                            required_lamports,
+                            "Wallet balance insufficient for Ultra fees plus Jito tip — skipping cycle"
+                        );
+                        continue;
+                    }
+
+                    info!(
+                        stage = "[SWAP BUILT]",
+                        iteration,
+                        request_id = %ultra_order.request_id,
+                        tx_b64_len = ultra_order.transaction_b64.len(),
+                        required_lamports,
+                        "Jupiter Ultra swap transaction received"
+                    );
+
+                    match hot_rpc.simulate_transaction(&ultra_order.transaction_b64).await {
+                        Ok(true) => {
+                            info!(
+                                stage = "[SIMULATION PASSED]",
+                                iteration,
+                                path = %dex_path,
+                                "Ultra transaction simulation passed"
+                            );
+                        }
+                        Ok(false) => {
+                            warn!(
+                                stage = "[ERROR]",
+                                iteration,
+                                path = %dex_path,
+                                "Ultra transaction simulation failed — skipping cycle"
+                            );
+                            adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                stage = "[ERROR]",
+                                error = %e,
+                                path = %dex_path,
+                                "Ultra transaction simulation RPC error — skipping cycle"
+                            );
+                            adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
+                            continue;
+                        }
+                    }
+
+                    let signed = match attach_jito_tip_and_sign(
+                        &ultra_order.transaction_b64,
+                        fkp,
+                        &config.jito_tip_account,
+                        config.jito_tip_lamports,
+                    ) {
+                        Ok(signed) => signed,
+                        Err(e) => {
+                            warn!(stage = "[ERROR]", error = %e, "Failed to attach Jito tip and sign transaction");
+                            adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
                             continue;
                         }
                     };
 
                     info!(
-                        stage = "[SIGN TX]",
+                        stage = "[JITO TIP ATTACHED]",
                         iteration,
-                        tx_bytes = tx_bytes.len(),
-                        signer = %operator_pubkey,
-                        elapsed_us = t_hot_start.elapsed().as_micros(),
-                        "Atomic transaction built and signed"
+                        tip_lamports = config.jito_tip_lamports,
+                        tip_account = %config.jito_tip_account,
+                        signature = %signed.signature,
+                        tx_bytes = signed.tx_bytes.len(),
+                        "Jito tip instruction attached and transaction signed"
                     );
 
-                    if tx_bytes.is_empty() {
-                        warn!(iteration, "Atomic tx builder returned empty bytes — skipping");
-                        continue;
-                    }
-
-                    // ── Step 8: On-chain simulation gate (mandatory pre-submission check) ─
-                    // Simulates the transaction against current chain state.
-                    // A rejected simulation means the tx WOULD revert on-chain — never submit.
-                    {
-                        let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
-                        match hot_rpc.simulate_transaction(&tx_b64).await {
-                            Ok(true) => {
-                                info!(
-                                    path = %dex_path,
-                                    "On-chain simulation: PASS — proceeding to Jito submission"
-                                );
-                            }
-                            Ok(false) => {
-                                warn!(
-                                    path = %dex_path,
-                                    "On-chain simulation: REJECTED — tx would fail, skipping Jito"
-                                );
-                                adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
-                                tip_strategy.record_outcome(TipOutcome::Rejected, swap_tip_lamports);
-                                continue;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    error = %e,
-                                    path  = %dex_path,
-                                    "On-chain simulation: RPC error — skipping to avoid on-chain loss"
-                                );
-                                continue;
-                            }
-                        }
-                    }
-
-                    info!(
-                        stage = "[SEND TX]",
-                        iteration,
-                        tx_bytes     = tx_bytes.len(),
-                        borrow_sol   = format!("{:.6}", borrow_lamports as f64 / 1e9),
-                        repay_sol    = format!("{:.6}", repay_lamports  as f64 / 1e9),
-                        tip_lamports = swap_tip_lamports,
-                        tip_account  = %jito_tip_account,
-                        tip_frac_pct = format!("{:.1}%", tip_strategy.tip_fraction_pct()),
-                        blockhash    = %blockhash,
-                        path         = %dex_path,
-                        "PIPELINE STAGE 5: atomic v0 tx built — on-chain simulation PASSED — submitting to Jito"
-                    );
-
-                    // ── Step 9: Submit to Jito bundle engine ─────────────────────────────
-                    let payloads = vec![tx_bytes];
-
-                    match jito.submit(payloads, profit_u64).await {
-                        Ok(bundle) => {
+                    let signed_b64 = base64::engine::general_purpose::STANDARD.encode(&signed.tx_bytes);
+                    let sent_signature = match hot_rpc.send_transaction_base64(&signed_b64).await {
+                        Ok(sig) => {
                             info!(
-                                stage = "[CONFIRMATION RESULT]",
+                                stage = "[TRANSACTION SENT]",
                                 iteration,
-                                bundle_id = %bs58::encode(bundle.id).into_string(),
-                                tx_count = bundle.transactions.len(),
-                                tip_lamports = bundle.tip_lamports,
-                                "Jito accepted bundle submission"
+                                signature = %sig,
+                                tx_bytes = signed.tx_bytes.len(),
+                                "Signed Ultra transaction sent to Solana RPC"
                             );
-                            let profit = order_quote.expected_profit_lamports();
+                            sig
+                        }
+                        Err(e) => {
+                            warn!(stage = "[ERROR]", error = %e, "Solana sendTransaction failed");
+                            adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
+                            continue;
+                        }
+                    };
+
+                    match hot_rpc.confirm_transaction(&sent_signature, 24, 500).await {
+                        Ok(status) => {
+                            info!(
+                                stage = "[CONFIRMED]",
+                                iteration,
+                                signature = %sent_signature,
+                                slot = status.slot,
+                                confirmations = ?status.confirmations,
+                                confirmation_status = ?status.confirmation_status,
+                                "Transaction confirmed on-chain"
+                            );
+                            let profit = ultra_order.expected_profit_lamports();
                             pnl.add(profit);
                             session_stats.record_trade(profit);
                             metrics.bundles_submitted.inc();
@@ -956,7 +833,6 @@ async fn main() -> Result<()> {
                             circuit_breaker.record_trade(profit).ok();
                             self_optimizer.record_trade(profit);
                             adaptive_cooldown.record_outcome(SubmitOutcome::Success);
-                            tip_strategy.record_outcome(TipOutcome::Accepted, swap_tip_lamports);
 
                             if submitted_path_hashes.len() >= 64 {
                                 submitted_path_hashes.clear();
@@ -969,7 +845,7 @@ async fn main() -> Result<()> {
                                 trade.position_lamports,
                                 profit,
                                 trade.path.gnn_confidence,
-                                Some(bundle.id),
+                                None,
                                 false,
                                 &dex_path,
                             );
@@ -977,32 +853,8 @@ async fn main() -> Result<()> {
                             guard.commit();
                         }
                         Err(e) => {
-                            warn!(
-                                stage = "[ERROR]",
-                                error = %e,
-                                iteration,
-                                "Jito submission returned an error"
-                            );
-                            // Classify 429 rate limits separately for adaptive cooldown
-                            let is_rate_limit = e.to_string().contains("429")
-                                || e.to_string().to_lowercase().contains("rate");
-                            if is_rate_limit {
-                                warn!(
-                                    error = %e,
-                                    iter  = iteration,
-                                    "Jito 429 rate limit — backing off"
-                                );
-                                adaptive_cooldown.record_outcome(SubmitOutcome::RateLimit);
-                                tip_strategy.record_outcome(TipOutcome::RateLimit, swap_tip_lamports);
-                            } else {
-                                warn!(
-                                    error = %e,
-                                    iter  = iteration,
-                                    "Bundle submission failed — not counting as trading loss"
-                                );
-                                adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
-                                tip_strategy.record_outcome(TipOutcome::Rejected, swap_tip_lamports);
-                            }
+                            warn!(stage = "[ERROR]", error = %e, signature = %sent_signature, "Transaction confirmation failed");
+                            adaptive_cooldown.record_outcome(SubmitOutcome::Failure);
                             self_optimizer.record_trade(-1000);
                         }
                     }
@@ -1027,14 +879,12 @@ async fn main() -> Result<()> {
                 pnl_sol            = format!("{:+.9}", pnl.total_sol()),
                 current_slippage   = opt_params.slippage_bps,
                 current_min_profit = opt_params.min_profit_lamports,
-                tip_fraction_pct   = format!("{:.1}%", tip_strategy.tip_fraction_pct()),
-                tip_efficiency     = format!("{:.3}", tip_strategy.tip_efficiency()),
+                jito_tip_lamports  = config.jito_tip_lamports,
                 cooldown_ms        = adaptive_cooldown.current_ms(),
                 bundles_submitted  = total_sub,
                 bundles_accepted   = total_ok,
                 bundles_rate_limit = total_429,
                 bundles_failed     = total_fail,
-                acceptance_rate    = format!("{:.1}%", tip_strategy.acceptance_rate() * 100.0),
                 ingress_source     = ingress_source,
                 "Periodic status — LIVE TRADING ENGINE"
             );
@@ -1045,32 +895,70 @@ async fn main() -> Result<()> {
     }
 }
 
+fn validate_required_environment(config: &ApexConfig) -> Result<()> {
+    if config.simulation_only {
+        anyhow::bail!("APEX_SIMULATION_ONLY=true is not allowed for live Ultra execution");
+    }
+    if config.jupiter_api_key.as_ref().map(|k| k.trim().is_empty()).unwrap_or(true) {
+        anyhow::bail!("JUPITER_API_KEY is required for Jupiter Ultra API");
+    }
+    if config.helius_api_key.as_ref().map(|k| !k.trim().is_empty()).unwrap_or(false) == false
+        && config.alchemy_api_key.as_ref().map(|k| !k.trim().is_empty()).unwrap_or(false) == false
+    {
+        anyhow::bail!("HELIUS_API_KEY or ALCHEMY_API_KEY is required; mock execution is disabled");
+    }
+    if config.jito_tip_account.contains('<') || config.jito_tip_account.trim().is_empty() {
+        anyhow::bail!("JITO_TIP_ACCOUNT must be a real Jito tip account pubkey");
+    }
+    let decoded = bs58::decode(&config.jito_tip_account)
+        .into_vec()
+        .map_err(|e| anyhow::anyhow!("JITO_TIP_ACCOUNT is not valid base58: {e}"))?;
+    if decoded.len() != 32 {
+        anyhow::bail!("JITO_TIP_ACCOUNT must decode to 32 bytes, got {}", decoded.len());
+    }
+    if config.jito_tip_lamports < 1_000 {
+        anyhow::bail!("JITO_TIP_LAMPORTS must be at least 1000 lamports");
+    }
+    info!(
+        stage = "[CONFIG OK]",
+        jupiter_api = "configured",
+        live_ingress = "configured",
+        jito_tip_account = %config.jito_tip_account,
+        jito_tip_lamports = config.jito_tip_lamports,
+        "Required live environment variables validated"
+    );
+    Ok(())
+}
+
+fn enforce_wallet_balance(balance_lamports: u64, tip_lamports: u64) -> Result<()> {
+    let minimum = 10_000u64.saturating_add(tip_lamports).saturating_add(5_000);
+    if balance_lamports < minimum {
+        anyhow::bail!(
+            "wallet balance {balance_lamports} lamports is insufficient for fees plus Jito tip; minimum {minimum}"
+        );
+    }
+    Ok(())
+}
+
+fn enforce_system_wallet(owner: &str, data_len: usize) -> Result<()> {
+    if owner != "11111111111111111111111111111111" || data_len != 0 {
+        anyhow::bail!(
+            "operator wallet is not a plain system account (owner={owner}, data_len={data_len}); Jito SystemProgram tip transfers require a system-owned fee wallet"
+        );
+    }
+    info!(
+        stage = "[WALLET OK]",
+        owner,
+        data_len,
+        "Operator wallet is valid for SystemProgram Jito tip transfers"
+    );
+    Ok(())
+}
+
 // ─── Lightweight packet filter ────────────────────────────────────────────────
 #[inline(always)]
 fn filter_accepts(shred: &ShredEvent) -> bool {
     !shred.data.is_empty() && shred.data.len() <= 65536
-}
-
-// ─── Instruction conversion: V2Instruction → AtomicInstruction ───────────────
-/// Convert a slice of Jupiter V2 API instructions into AtomicInstruction format
-/// expected by `build_atomic_flash_v0`. Decodes instruction data from base64.
-fn to_atomic_ixs(ixs: &[ingress::V2Instruction]) -> anyhow::Result<Vec<AtomicInstruction>> {
-    ixs.iter()
-        .map(|ix| {
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(&ix.data)
-                .map_err(|e| anyhow::anyhow!("base64 decode failed for {}: {e}", ix.program_id))?;
-            Ok(AtomicInstruction {
-                program_id: ix.program_id.clone(),
-                accounts: ix.accounts.iter().map(|a| AtomicAccountMeta {
-                    pubkey:      a.pubkey.clone(),
-                    is_signer:   a.is_signer,
-                    is_writable: a.is_writable,
-                }).collect(),
-                data,
-            })
-        })
-        .collect()
 }
 
 async fn validate_all_connections(config: &ApexConfig, jito: &JitoBundleHandler) {

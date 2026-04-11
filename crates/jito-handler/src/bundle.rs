@@ -540,7 +540,7 @@ fn sign_transaction(tx_bytes: &mut Vec<u8>, keypair: &ApexKeypair) -> anyhow::Re
 /// Transaction layout (legacy format):
 ///   [compact_u16(1)]    — 1 signature
 ///   [sig: 64 bytes]     — Ed25519 signature
-///   [header: 3 bytes]   — [num_req_sigs=1, num_ro_signed=0, num_ro_unsigned=2]
+///   [header: 3 bytes]   — [num_req_sigs=1, num_ro_signed=0, num_ro_unsigned=1]
 ///   [compact_u16(3)]    — 3 accounts: [from, tip_acct, system_program]
 ///   [3 × 32 bytes]      — account keys
 ///   [32 bytes]          — recent blockhash
@@ -566,7 +566,7 @@ fn build_tip_transaction(
     let mut msg: Vec<u8> = Vec::new();
     msg.push(1u8); // num_required_signatures
     msg.push(0u8); // num_readonly_signed
-    msg.push(2u8); // num_readonly_unsigned (tip_acct + system_program)
+    msg.push(1u8); // num_readonly_unsigned (system_program)
 
     msg.push(3u8); // compact-u16: 3 accounts
     msg.extend_from_slice(&from_bytes);

@@ -88,6 +88,20 @@ struct SimulateValue {
     logs: Option<Vec<String>>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct SignatureStatus {
+    pub slot: u64,
+    pub confirmations: Option<u64>,
+    pub err: Option<serde_json::Value>,
+    #[serde(rename = "confirmationStatus")]
+    pub confirmation_status: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct SignatureStatusesResult {
+    value: Vec<Option<SignatureStatus>>,
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
 /// Minimal Solana JSON-RPC client.
@@ -206,13 +220,86 @@ impl SolanaRpcClient {
         let result = self.post::<SimulateResult>(&request).await?;
         let success = result.value.err.is_none();
 
+        if let Some(err) = &result.value.err {
+            warn!(error = ?err, "Simulation rejected transaction");
+        }
+
         if let Some(logs) = &result.value.logs {
-            for log in logs.iter().take(5) {
-                debug!(log = %log, "Simulation log");
+            for log in logs.iter().take(10) {
+                if success {
+                    debug!(log = %log, "Simulation log");
+                } else {
+                    warn!(log = %log, "Simulation rejection log");
+                }
             }
         }
 
         Ok(success)
+    }
+
+    pub async fn send_transaction_base64(&self, tx_b64: &str) -> Result<String> {
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            id: 5,
+            method: "sendTransaction",
+            params: serde_json::json!([
+                tx_b64,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "maxRetries": 3
+                }
+            ]),
+        };
+
+        self.post::<String>(&request).await
+    }
+
+    pub async fn get_signature_status(&self, signature: &str) -> Result<Option<SignatureStatus>> {
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            id: 6,
+            method: "getSignatureStatuses",
+            params: serde_json::json!([
+                [signature],
+                {"searchTransactionHistory": true}
+            ]),
+        };
+
+        let result = self.post::<SignatureStatusesResult>(&request).await?;
+        Ok(result.value.into_iter().next().flatten())
+    }
+
+    pub async fn confirm_transaction(&self, signature: &str, attempts: u32, delay_ms: u64) -> Result<SignatureStatus> {
+        for attempt in 1..=attempts {
+            match self.get_signature_status(signature).await? {
+                Some(status) if status.err.is_none() => {
+                    let confirmed = status.confirmation_status.as_deref() == Some("confirmed")
+                        || status.confirmation_status.as_deref() == Some("finalized")
+                        || status.confirmations.is_none();
+                    if confirmed {
+                        return Ok(status);
+                    }
+                }
+                Some(status) => {
+                    return Err(anyhow::anyhow!(
+                        "transaction failed at slot {}: {:?}",
+                        status.slot,
+                        status.err
+                    ));
+                }
+                None => {}
+            }
+
+            if attempt < attempts {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "transaction confirmation timed out after {attempts} attempts"
+        ))
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(

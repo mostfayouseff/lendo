@@ -54,7 +54,7 @@ use std::sync::Arc;
 use strategy::ArbitrageStrategy;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use ingress::ShredEvent;
 
@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let startup_trace = std::time::Instant::now();
+    info!(stage = "[START]", "Execution trace initialized");
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║   APEX-MEV Neural Core 3.0  — LIVE MAINNET TRADING          ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
@@ -75,6 +77,18 @@ async fn main() -> Result<()> {
     // ── Configuration ─────────────────────────────────────────────────────────
     let config = ApexConfig::from_env()
         .context("Failed to load configuration — check env vars")?;
+    info!(
+        stage = "[CONFIG LOADED]",
+        elapsed_ms = startup_trace.elapsed().as_millis(),
+        simulation_only = config.simulation_only,
+        rpc_url = %config.rpc_url,
+        http_rpc_url = %config.http_rpc_url,
+        keypair_path = %config.keypair_path,
+        helius_configured = config.helius_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+        alchemy_configured = config.alchemy_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+        jupiter_configured = config.jupiter_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+        "Configuration loaded and validated"
+    );
 
     info!(
         simulation_only   = config.simulation_only,
@@ -94,7 +108,13 @@ async fn main() -> Result<()> {
     match SolanaRpcClient::new(&config.http_rpc_url) {
         Ok(rpc_check) => match rpc_check.get_slot().await {
             Ok(slot) => {
-                info!(slot, url = %config.http_rpc_url, "Solana RPC: CONNECTED — getSlot OK");
+                info!(
+                    stage = "[RPC CONNECTED]",
+                    slot,
+                    url = %config.http_rpc_url,
+                    elapsed_ms = startup_trace.elapsed().as_millis(),
+                    "Solana RPC getSlot OK"
+                );
             }
             Err(e) => {
                 warn!(
@@ -278,6 +298,24 @@ async fn main() -> Result<()> {
             .context("Failed to build hot-path RPC client")?,
     );
     info!(url = %config.http_rpc_url, "Hot-path RPC client initialised (shared across trade cycles)");
+
+    validate_all_connections(&config, &jito).await;
+
+    if config.simulation_only {
+        warn!(
+            stage = "[SEND TX]",
+            simulation_only = true,
+            "Forced startup transaction skipped because simulation-only mode is enabled"
+        );
+    } else if let Some(kp) = flash_keypair.as_ref() {
+        force_startup_transaction(hot_rpc.as_ref(), kp.as_ref()).await;
+    } else {
+        error!(
+            stage = "[ERROR]",
+            keypair_path = %config.keypair_path,
+            "Forced startup transaction cannot run because the live signing keypair was not loaded"
+        );
+    }
 
     // ── Ingress streams ────────────────────────────────────────────────────────
     // Priority: Helius (PRIMARY) → Alchemy (FALLBACK) → Mock (LAST RESORT)
@@ -525,6 +563,7 @@ async fn main() -> Result<()> {
                 }
 
                 info!(
+                    stage = "[OPPORTUNITY DETECTED]",
                     iteration,
                     hops       = trade.path.edges.len(),
                     profit_est = trade.path.expected_profit_lamports,
@@ -557,14 +596,31 @@ async fn main() -> Result<()> {
                 let active_min_profit = self_optimizer.params().min_profit_lamports;
 
                 let t_sim = std::time::Instant::now();
+                info!(
+                    stage = "[SIMULATION START]",
+                    iteration,
+                    position_lamports = trade.position_lamports,
+                    hops = hops.len(),
+                    min_required = active_min_profit,
+                    "Pre-simulation started"
+                );
                 let sim_result = pre_sim.simulate_swap(
                     trade.position_lamports,
                     &hops,
                     active_min_profit,
                 );
-                let _sim_us = t_sim.elapsed().as_micros();
+                let sim_us = t_sim.elapsed().as_micros();
 
                 let sim_ok = sim_result.is_profitable(active_min_profit);
+                info!(
+                    stage = "[SIMULATION RESULT]",
+                    iteration,
+                    ok = sim_ok,
+                    expected_profit_lamports = sim_result.expected_profit_lamports,
+                    error = ?sim_result.error,
+                    elapsed_us = sim_us,
+                    "Pre-simulation completed"
+                );
                 self_optimizer.record_simulation(sim_ok);
 
                 if !sim_ok {
@@ -670,6 +726,7 @@ async fn main() -> Result<()> {
 
                     // ── Step 2: GET /order — confirm profitability (detection only) ────────
                     info!(
+                        stage = "[BUILD TX]",
                         iteration,
                         leg1 = format!("{} → {}", &leg1_in[..8.min(leg1_in.len())], &leg1_out[..8.min(leg1_out.len())]),
                         position_lamports = trade.position_lamports,
@@ -813,10 +870,19 @@ async fn main() -> Result<()> {
                     ) {
                         Ok(b) => b,
                         Err(e) => {
-                            warn!(error = %e, "build_atomic_flash_v0 failed — skipping");
+                            warn!(stage = "[ERROR]", error = %e, "build_atomic_flash_v0 failed — skipping");
                             continue;
                         }
                     };
+
+                    info!(
+                        stage = "[SIGN TX]",
+                        iteration,
+                        tx_bytes = tx_bytes.len(),
+                        signer = %operator_pubkey,
+                        elapsed_us = t_hot_start.elapsed().as_micros(),
+                        "Atomic transaction built and signed"
+                    );
 
                     if tx_bytes.is_empty() {
                         warn!(iteration, "Atomic tx builder returned empty bytes — skipping");
@@ -856,6 +922,7 @@ async fn main() -> Result<()> {
                     }
 
                     info!(
+                        stage = "[SEND TX]",
                         iteration,
                         tx_bytes     = tx_bytes.len(),
                         borrow_sol   = format!("{:.6}", borrow_lamports as f64 / 1e9),
@@ -873,6 +940,14 @@ async fn main() -> Result<()> {
 
                     match jito.submit(payloads, profit_u64).await {
                         Ok(bundle) => {
+                            info!(
+                                stage = "[CONFIRMATION RESULT]",
+                                iteration,
+                                bundle_id = %bs58::encode(bundle.id).into_string(),
+                                tx_count = bundle.transactions.len(),
+                                tip_lamports = bundle.tip_lamports,
+                                "Jito accepted bundle submission"
+                            );
                             let profit = order_quote.expected_profit_lamports();
                             pnl.add(profit);
                             session_stats.record_trade(profit);
@@ -902,6 +977,12 @@ async fn main() -> Result<()> {
                             guard.commit();
                         }
                         Err(e) => {
+                            warn!(
+                                stage = "[ERROR]",
+                                error = %e,
+                                iteration,
+                                "Jito submission returned an error"
+                            );
                             // Classify 429 rate limits separately for adaptive cooldown
                             let is_rate_limit = e.to_string().contains("429")
                                 || e.to_string().to_lowercase().contains("rate");
@@ -990,4 +1071,303 @@ fn to_atomic_ixs(ixs: &[ingress::V2Instruction]) -> anyhow::Result<Vec<AtomicIns
             })
         })
         .collect()
+}
+
+async fn validate_all_connections(config: &ApexConfig, jito: &JitoBundleHandler) {
+    validate_rpc_connection("Configured Solana RPC", &config.http_rpc_url).await;
+
+    if let Some(key) = config.helius_api_key.as_ref().filter(|k| !k.is_empty()) {
+        let url = format!("https://mainnet.helius-rpc.com/?api-key={key}");
+        validate_rpc_connection("Helius RPC", &url).await;
+    } else {
+        warn!(stage = "[ERROR]", service = "Helius RPC", "HELIUS_API_KEY is not configured");
+    }
+
+    if let Some(key) = config.alchemy_api_key.as_ref().filter(|k| !k.is_empty()) {
+        let url = format!("https://solana-mainnet.g.alchemy.com/v2/{key}");
+        validate_rpc_connection("Alchemy RPC", &url).await;
+    } else {
+        warn!(stage = "[ERROR]", service = "Alchemy RPC", "ALCHEMY_API_KEY is not configured");
+    }
+
+    let t = std::time::Instant::now();
+    match jito.get_tip_accounts().await {
+        accounts if !accounts.is_empty() => {
+            info!(
+                stage = "[RPC CONNECTED]",
+                service = "Jito endpoint",
+                tip_accounts = accounts.len(),
+                elapsed_ms = t.elapsed().as_millis(),
+                "Jito endpoint validation succeeded"
+            );
+        }
+        _ => {
+            error!(
+                stage = "[ERROR]",
+                service = "Jito endpoint",
+                elapsed_ms = t.elapsed().as_millis(),
+                "Jito endpoint validation failed"
+            );
+        }
+    }
+}
+
+async fn validate_rpc_connection(label: &str, url: &str) {
+    let t = std::time::Instant::now();
+    match SolanaRpcClient::new(url) {
+        Ok(client) => match client.get_slot().await {
+            Ok(slot) => {
+                info!(
+                    stage = "[RPC CONNECTED]",
+                    service = label,
+                    slot,
+                    elapsed_ms = t.elapsed().as_millis(),
+                    "RPC validation succeeded"
+                );
+            }
+            Err(e) => {
+                error!(
+                    stage = "[ERROR]",
+                    service = label,
+                    url = %url,
+                    error = %e,
+                    elapsed_ms = t.elapsed().as_millis(),
+                    "RPC validation failed"
+                );
+            }
+        },
+        Err(e) => {
+            error!(
+                stage = "[ERROR]",
+                service = label,
+                url = %url,
+                error = %e,
+                elapsed_ms = t.elapsed().as_millis(),
+                "RPC client construction failed"
+            );
+        }
+    }
+}
+
+async fn force_startup_transaction(rpc: &SolanaRpcClient, keypair: &ApexKeypair) {
+    const MAX_ATTEMPTS: u32 = 3;
+    const MEMO_PROGRAM: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let trace = std::time::Instant::now();
+        info!(
+            stage = "[BUILD TX]",
+            attempt,
+            from = %keypair.pubkey_b58,
+            memo_program = MEMO_PROGRAM,
+            "Forced startup proof transaction build started"
+        );
+
+        let blockhash = match rpc.get_latest_blockhash().await {
+            Ok(bh) => bh.blockhash,
+            Err(e) => {
+                error!(
+                    stage = "[ERROR]",
+                    attempt,
+                    error = %e,
+                    elapsed_ms = trace.elapsed().as_millis(),
+                    "Forced startup transaction could not fetch blockhash"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                continue;
+            }
+        };
+
+        let (tx_bytes, signature) = match build_startup_memo_tx(
+            keypair,
+            &blockhash,
+        ) {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    stage = "[ERROR]",
+                    attempt,
+                    error = %e,
+                    elapsed_ms = trace.elapsed().as_millis(),
+                    "Forced startup transaction build failed"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                continue;
+            }
+        };
+
+        info!(
+            stage = "[SIGN TX]",
+            attempt,
+            signature = %signature,
+            tx_bytes = tx_bytes.len(),
+            elapsed_ms = trace.elapsed().as_millis(),
+            "Forced startup proof transaction signed"
+        );
+
+        let tx_b64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+        let sim_t = std::time::Instant::now();
+        info!(
+            stage = "[SIMULATION START]",
+            attempt,
+            signature = %signature,
+            tx_bytes = tx_bytes.len(),
+            "Forced startup proof transaction simulation started"
+        );
+
+        match rpc.simulate_transaction(&tx_b64).await {
+            Ok(true) => {
+                info!(
+                    stage = "[SIMULATION RESULT]",
+                    attempt,
+                    signature = %signature,
+                    ok = true,
+                    elapsed_ms = sim_t.elapsed().as_millis(),
+                    "Forced startup proof transaction simulation passed"
+                );
+            }
+            Ok(false) => {
+                error!(
+                    stage = "[SIMULATION RESULT]",
+                    attempt,
+                    signature = %signature,
+                    ok = false,
+                    elapsed_ms = sim_t.elapsed().as_millis(),
+                    "Forced startup proof transaction simulation rejected"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                continue;
+            }
+            Err(e) => {
+                error!(
+                    stage = "[ERROR]",
+                    attempt,
+                    signature = %signature,
+                    error = %e,
+                    elapsed_ms = sim_t.elapsed().as_millis(),
+                    "Forced startup proof transaction simulation failed"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                continue;
+            }
+        }
+
+        let send_t = std::time::Instant::now();
+        info!(
+            stage = "[SEND TX]",
+            attempt,
+            signature = %signature,
+            tx_bytes = tx_bytes.len(),
+            "Forced startup proof transaction send started"
+        );
+
+        match rpc.send_transaction_base64(&tx_b64).await {
+            Ok(sent_signature) => {
+                info!(
+                    stage = "[SEND TX]",
+                    attempt,
+                    signature = %sent_signature,
+                    elapsed_ms = send_t.elapsed().as_millis(),
+                    "Forced startup proof transaction sent"
+                );
+
+                let confirm_t = std::time::Instant::now();
+                match rpc.confirm_transaction(&sent_signature, 30, 500).await {
+                    Ok(status) => {
+                        info!(
+                            stage = "[CONFIRMATION RESULT]",
+                            attempt,
+                            signature = %sent_signature,
+                            slot = status.slot,
+                            confirmations = ?status.confirmations,
+                            confirmation_status = ?status.confirmation_status,
+                            elapsed_ms = confirm_t.elapsed().as_millis(),
+                            total_elapsed_ms = trace.elapsed().as_millis(),
+                            "Forced startup proof transaction confirmed on-chain"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        error!(
+                            stage = "[ERROR]",
+                            attempt,
+                            signature = %sent_signature,
+                            error = %e,
+                            elapsed_ms = confirm_t.elapsed().as_millis(),
+                            "Forced startup proof transaction confirmation failed"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    stage = "[ERROR]",
+                    attempt,
+                    signature = %signature,
+                    error = %e,
+                    elapsed_ms = send_t.elapsed().as_millis(),
+                    "Forced startup proof transaction send failed"
+                );
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    }
+
+    error!(
+        stage = "[ERROR]",
+        attempts = MAX_ATTEMPTS,
+        "Forced startup proof transaction exhausted all retry attempts without confirmation"
+    );
+}
+
+fn build_startup_memo_tx(
+    keypair: &ApexKeypair,
+    blockhash_b58: &str,
+) -> anyhow::Result<(Vec<u8>, String)> {
+    let memo_program_b58 = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+    let from_bytes = keypair.pubkey_bytes;
+    let memo_program_bytes = bs58_to_32_checked(memo_program_b58)?;
+    let blockhash_bytes = bs58_to_32_checked(blockhash_b58)?;
+    let ix_data = format!("apex-mev startup proof {}", chrono::Utc::now().timestamp_millis())
+        .into_bytes();
+
+    let mut msg = Vec::new();
+    msg.push(1_u8);
+    msg.push(0_u8);
+    msg.push(1_u8);
+    msg.push(2_u8);
+    msg.extend_from_slice(&from_bytes);
+    msg.extend_from_slice(&memo_program_bytes);
+    msg.extend_from_slice(&blockhash_bytes);
+    msg.push(1_u8);
+    msg.push(1_u8);
+    msg.push(1_u8);
+    msg.push(0_u8);
+    msg.push(ix_data.len() as u8);
+    msg.extend_from_slice(&ix_data);
+
+    let sig = keypair.sign(&msg);
+    if !keypair.verify(&msg, &sig) {
+        anyhow::bail!("startup proof signature verification failed");
+    }
+
+    let mut tx = Vec::with_capacity(1 + 64 + msg.len());
+    tx.push(1_u8);
+    tx.extend_from_slice(&sig);
+    tx.extend_from_slice(&msg);
+
+    Ok((tx, bs58::encode(sig).into_string()))
+}
+
+fn bs58_to_32_checked(value: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = bs58::decode(value)
+        .into_vec()
+        .map_err(|e| anyhow::anyhow!("invalid base58 public key {value}: {e}"))?;
+    if bytes.len() != 32 {
+        anyhow::bail!("base58 public key {value} decoded to {} bytes, expected 32", bytes.len());
+    }
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }

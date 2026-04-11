@@ -18,6 +18,13 @@ Rust workspace with nine specialized crates:
 
 ## Live Trading Architecture (Phase 14+)
 
+### Startup Execution Proof
+- On startup, the bot now emits structured execution trace markers: `[START]`, `[CONFIG LOADED]`, `[RPC CONNECTED]`, `[OPPORTUNITY DETECTED]`, `[SIMULATION START]`, `[SIMULATION RESULT]`, `[BUILD TX]`, `[SIGN TX]`, `[SEND TX]`, `[CONFIRMATION RESULT]`, and `[ERROR]`.
+- Before entering the MEV hot loop, the bot validates the configured Solana RPC, Helius RPC when configured, Alchemy RPC when configured, and the Jito endpoint.
+- In live mode, the bot forces a real startup proof transaction that builds, signs, sends, and confirms a Memo transaction on-chain. This bypasses arbitrage profitability logic and proves the keypair/RPC/send/confirmation path independently.
+- The configured operator account currently carries account data, so a System Program transfer from that account is rejected by Solana with `Transfer: from must not carry data`. The startup proof intentionally uses the Memo program instead of a transfer so the send/confirm pipeline can be verified without requiring a plain system-transfer source account.
+- Helius and Alchemy API keys are currently not configured in the environment, so live WebSocket ingress falls back to the mock stream. Jupiter unauthenticated endpoints may return HTTP 429 rate limits.
+
 ### Ingress Priority Chain
 1. **Helius WebSocket (PRIMARY)** — `wss://mainnet.helius-rpc.com/?api-key=<KEY>`  
    Uses both `logsSubscribe` (standard Solana) and `transactionSubscribe` (Helius-enhanced) on 7 DEX programs. Full self-healing reconnect with exponential back-off.

@@ -1,0 +1,134 @@
+CRITICAL FAILURE: NO REQUESTS ARE BEING SENT
+
+No requests are reaching Alchemy, Helius, or Jito.
+This means the system is failing BEFORE the send stage.
+
+You must treat the ENTIRE pipeline as broken and rebuild/verify it step-by-step.
+
+========================
+PRIMARY OBJECTIVE
+========================
+Ensure that at least ONE real transaction is:
+- Built
+- Signed
+- Sent
+- Confirmed on-chain
+
+========================
+STEP 1: FULL EXECUTION TRACE
+========================
+Add detailed logs for EVERY stage:
+
+[START]
+[CONFIG LOADED]
+[RPC CONNECTED]
+[OPPORTUNITY DETECTED]
+[SIMULATION START]
+[SIMULATION RESULT]
+[BUILD TX]
+[SIGN TX]
+[SEND TX]
+[CONFIRMATION RESULT]
+[ERROR]
+
+Each log must include:
+- Input data
+- Output result
+- Execution time
+- Errors (if any)
+
+========================
+STEP 2: FORCE TEST TRANSACTION (MANDATORY)
+========================
+Immediately on startup:
+- Send a simple test transaction
+- DO NOT wait for arbitrage logic
+- DO NOT depend on profitability
+
+Purpose:
+Verify that sending works at all
+
+========================
+STEP 3: VALIDATE ALL CONNECTIONS
+========================
+Independently test:
+- Alchemy RPC
+- Helius RPC
+- Jito endpoint
+
+For each:
+- Send a ping / simple request
+- Log success/failure clearly
+
+========================
+STEP 4: BYPASS ALL LOGIC TEMPORARILY
+========================
+Disable:
+- Profitability checks
+- Filters
+- Opportunity conditions
+
+Force the system to:
+→ Build + Sign + Send at least ONE transaction
+
+========================
+STEP 5: VERIFY TRANSACTION PIPELINE
+========================
+Ensure:
+- Transaction is actually created
+- Required fields are valid
+- Wallet/private key is loaded correctly
+- Signing step completes successfully
+- Send function is actually called
+
+========================
+STEP 6: FIX ASYNC & SILENT FAILURES
+========================
+- Ensure all async functions are awaited
+- No unhandled promises
+- No silent failures
+- Wrap all steps in try/catch with full error logging
+
+========================
+STEP 7: RETRY MECHANISM
+========================
+If sending fails:
+- Retry up to 3 times
+- Log each retry attempt
+- Include failure reason
+
+========================
+STEP 8: MEV SEQUENCE VALIDATION
+========================
+After fixing sending, restore full MEV flow:
+
+1. Detect opportunity
+2. Simulate trade
+3. If profitable → build tx
+4. Sign tx
+5. Send via Jito / RPC
+6. Confirm execution
+7. Track profit/loss
+
+Ensure STRICT order (no skipped steps)
+
+========================
+STEP 9: CLEANUP & OPTIMIZATION
+========================
+- Remove dead code
+- Fix misconfigurations
+- Validate environment variables (RPC URLs, keys)
+- Measure latency for each step
+
+========================
+FINAL REQUIREMENTS
+========================
+- At least ONE transaction must be successfully sent
+- At least ONE confirmation must be received
+- System must run continuously without stopping
+- If failure occurs → auto-debug and retry until success
+
+DO NOT ASSUME ANYTHING IS WORKING.
+VERIFY EVERYTHING.
+FIX EVERYTHING.
+EXECUTE UNTIL SUCCESS.

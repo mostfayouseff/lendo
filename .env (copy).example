@@ -1,0 +1,65 @@
+# ============================================================
+# Apex-MEV Neural Core 3.0 — Environment Variable Reference
+# Copy to .env and fill in real values
+# NEVER commit .env to version control
+# ============================================================
+
+# ── Solana RPC ───────────────────────────────────────────────
+# WebSocket endpoint (used for ingress when no Helius key is set)
+APEX_RPC_URL=wss://api.mainnet-beta.solana.com
+
+# HTTP JSON-RPC endpoint (used for getSlot, getLatestBlockhash, getBalance)
+# Tip: Use your Helius HTTP URL here for better rate limits
+APEX_HTTP_RPC_URL=https://api.mainnet-beta.solana.com
+
+# ── Helius ───────────────────────────────────────────────────
+# Helius API key — enables real on-chain transaction stream via
+# Enhanced WebSocket (transactionSubscribe for all DEX programs)
+# Get your key at: https://www.helius.dev/
+# Without this, the system falls back to MockShredStream (synthetic data)
+HELIUS_API_KEY=your_helius_api_key_here
+
+# ── Keypair ──────────────────────────────────────────────────
+# Path to operator keypair JSON file (64-byte array, standard Solana CLI format)
+# Generate with: solana-keygen new -o /path/to/keypair.json
+# In simulation mode this file must exist but can be a mock (any 64 bytes)
+APEX_KEYPAIR_PATH=/tmp/mock-keypair.json
+
+# ── Strategy ─────────────────────────────────────────────────
+# Minimum profit threshold in lamports to attempt execution
+APEX_MIN_PROFIT_LAMPORTS=5000
+
+# Maximum number of hops per arbitrage path (2–6)
+APEX_MAX_HOPS=4
+
+# Maximum capital per trade in lamports (1 SOL = 1,000,000,000 lamports)
+APEX_MAX_POSITION_LAMPORTS=1000000000
+
+# ── Jito ─────────────────────────────────────────────────────
+# Jito block engine HTTP endpoint
+APEX_JITO_URL=https://mainnet.block-engine.jito.wtf
+
+# Jito tip account (base58 pubkey)
+APEX_JITO_TIP_ACCOUNT=96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+
+# ── Risk / Circuit Breaker ────────────────────────────────────
+# Maximum cumulative loss before circuit breaker halts trading (lamports)
+APEX_CB_THRESHOLD_LAMPORTS=5000000000
+
+# Number of consecutive losses before circuit breaker activates
+APEX_CB_CONSECUTIVE_LOSSES=5
+
+# ── Safety ───────────────────────────────────────────────────
+# ALWAYS start with true. Set to false only after full audit on devnet.
+APEX_SIMULATION_ONLY=true
+
+# Optional: override Jupiter slippage tolerance (basis points, default 50)
+APEX_SLIPPAGE_BPS=50
+
+# ── Logging ──────────────────────────────────────────────────
+# info = production | debug = verbose | trace = hot-path detail
+RUST_LOG=info
+
+# Environment name: development | production
+# In production, .env is NOT loaded (env vars must be injected by the host)
+APEX_ENV=development

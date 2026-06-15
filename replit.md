@@ -1,72 +1,110 @@
-# Apex-MEV Neural Core 3.0
+# Apex MEV Platform
 
-A production-focused Solana MEV arbitrage system built in Rust. Live execution is configured to use Jupiter Ultra orders only for trade construction; mock execution and legacy Jupiter Swap V2 trade endpoints are disabled.
+A production-grade Solana Flash Loan Arbitrage Platform built on top of the Apex-MEV Neural Core 3.0 Rust engine. Includes a full REST+WebSocket API server, PostgreSQL/Redis-backed storage, JWT/RBAC authentication, Anchor smart contract for on-chain atomic flash loan arbitrage, HTML+TailwindCSS real-time dashboard, Prometheus/Grafana monitoring, and Docker deployment.
 
 ## Architecture
 
 Rust workspace with specialized crates:
 
-- **`crates/bot`** — Main entry point; validates live configuration, runs ingress, evaluates opportunities, requests Jupiter Ultra orders, simulates, attaches Jito tip, signs, sends, and confirms transactions.
-- **`crates/core`** (apex-core) — RICH Bellman-Ford negative-cycle detection and price matrix construction.
-- **`crates/ingress`** — Helius WebSocket primary stream, Alchemy fallback stream, Jupiter price monitor, and Jupiter Ultra order client.
+- **`crates/bot`** — MEV engine entry point; validates live config, ingests price data, evaluates Bellman-Ford arbitrage paths, requests Jupiter Ultra orders, simulates, attaches Jito tip, signs, sends, and confirms.
+- **`crates/api`** — Axum HTTP + WebSocket API server; all REST endpoints, JWT middleware, Prometheus metrics, static frontend serving.
+- **`crates/auth`** — JWT generation/validation, bcrypt password hashing, RBAC middleware, refresh-token session management.
+- **`crates/cache`** — Redis client wrapper, session store, sliding-window rate limiter.
+- **`crates/db`** — SQLx PostgreSQL models (13 migrations), repository pattern for all 11 entities.
+- **`crates/flash-loans`** — Solend, MarginFi, Kamino provider adapters with atomic execution flow.
+- **`crates/core`** — RICH Bellman-Ford negative-cycle detection and price matrix construction.
+- **`crates/ingress`** — Helius WebSocket primary stream, Alchemy fallback, Jupiter price monitor, Ultra order client.
 - **`crates/strategy`** — Arbitrage path evaluation and trade sizing.
-- **`crates/jito-handler`** — Solana RPC helpers, keypair handling, transaction mutation/signing, and Jito tip attachment.
-- **`crates/risk-oracle`** — Circuit breaker, anomaly detector, and self-optimizer.
+- **`crates/jito-handler`** — Solana RPC helpers, keypair handling, transaction signing, Jito tip attachment.
+- **`crates/risk-oracle`** — Circuit breaker, anomaly detector, self-optimizer.
 - **`crates/safety`** — Pre-simulation helpers and atomic revert guard.
-- **`crates/common`** — Shared types, metrics, and configuration.
+- **`crates/common`** — Shared types, metrics, configuration.
 - **`crates/solana-program`** — On-chain instruction codecs and DEX fee simulation helpers.
+- **`smart-contracts/`** — Anchor program `apex-arb` (separate compilation via `anchor build`).
+- **`frontend/dist/`** — HTML+vanilla JS+TailwindCSS 10-page dashboard served as static files.
 
-## Live Ultra Execution Pipeline
+## Running
 
-Every live trade follows this sequence:
+### Development — MEV bot only
+```
+cargo run --bin apex-mev
+```
 
-1. Validate required environment and wallet safety gates.
-2. Receive live ingress from Helius or Alchemy; mock ingress is rejected.
-3. Evaluate candidate arbitrage paths from live price data.
-4. Request a Jupiter Ultra order from `https://api.jup.ag/ultra/v1/order`.
-5. Simulate the returned unsigned Ultra transaction.
-6. Append the configured Jito System Program tip instruction.
-7. Sign with the operator keypair.
-8. Send the signed transaction through Solana RPC.
-9. Confirm the signature on-chain.
+### Development — API server + dashboard
+```
+cargo run --bin apex-api
+# Open http://localhost:8080 in browser
+```
 
-Legacy Jupiter `/swap/v2/*` trade construction files have been removed from the ingress crate.
+### Docker (full stack)
+```
+make docker-up
+# API:     http://localhost:8080
+# Grafana: http://localhost:3001
+```
 
-## Startup Execution Proof
+## Workflows
 
-- The bot can send a real Memo-program startup proof transaction when enabled.
-- The proof transaction builds, simulates, signs, sends, and confirms independently of arbitrage profitability.
-- Memo is used instead of a System Program transfer so startup proof works with non-empty source accounts.
+| Workflow | Command | Description |
+|---|---|---|
+| Start application | `cargo run --bin apex-mev` | Live MEV arbitrage engine |
+| Start API server | `cargo run --bin apex-api` | REST API + WebSocket + Dashboard |
 
-## Ingress Priority Chain
+## Required Environment Variables
 
-1. **Helius WebSocket (PRIMARY)** — `wss://mainnet.helius-rpc.com/?api-key=<KEY>`
-2. **Alchemy WebSocket (FALLBACK)** — `wss://solana-mainnet.g.alchemy.com/v2/<KEY>`
+Copy `.env.example` to `.env` and fill in all values.
 
-If neither key is configured, the bot exits. Mock ingress is not allowed for live execution.
+| Variable | Required for | Description |
+|---|---|---|
+| `DATABASE_URL` | API | PostgreSQL connection string |
+| `REDIS_URL` | API | Redis connection string |
+| `JWT_SECRET` | API | ≥64-char random secret for JWT signing |
+| `ADMIN_EMAIL` | API | Initial admin account email |
+| `ADMIN_PASSWORD` | API | Initial admin account password |
+| `APEX_HTTP_RPC_URL` | Both | Solana HTTP RPC endpoint |
+| `APEX_RPC_URL` | Both | Solana WebSocket RPC endpoint |
+| `HELIUS_API_KEY` or `ALCHEMY_API_KEY` | MEV bot | Live price ingress source |
+| `JUPITER_API_KEY` | MEV bot | Jupiter Ultra API |
+| `JITO_TIP_ACCOUNT` | MEV bot | Jito tip destination pubkey |
+| `APEX_SIMULATION_ONLY` | MEV bot | `false` for live execution |
+| `APEX_KEYPAIR_PATH` | MEV bot | Operator keypair JSON path |
+| `RUST_LOG` | Both | Log verbosity (`info`, `debug`) |
 
-## Required Configuration
+## API Endpoints
 
-All environment variables are set in Replit Secrets/env vars.
+All endpoints are under `/api/v1/`. Authentication via `Authorization: Bearer <token>`.
 
-| Variable | Description |
-|---|---|
-| `APEX_SIMULATION_ONLY=false` | Required for live execution; simulation-only mode is rejected |
-| `JUPITER_API_KEY` | Required for Jupiter Ultra API |
-| `HELIUS_API_KEY` or `ALCHEMY_API_KEY` | Required live ingress source |
-| `JITO_TIP_ACCOUNT` | Required Jito tip account pubkey |
-| `JITO_TIP_LAMPORTS` | Jito tip amount; defaults to `1000` |
-| `APEX_KEYPAIR_PATH` | Operator keypair path; defaults to `live-key.json` |
-| `APEX_HTTP_RPC_URL` | Solana HTTP RPC URL |
-| `APEX_RPC_URL` | Solana WebSocket RPC URL |
-| `APEX_MIN_PROFIT_LAMPORTS` | Minimum opportunity threshold |
-| `APEX_MAX_HOPS` | Maximum arbitrage path length |
-| `APEX_MAX_POSITION_LAMPORTS` | Maximum trade input size |
-| `RUST_LOG` | Log verbosity |
+| Method | Path | Description |
+|---|---|---|
+| POST | `/auth/login` | Login → JWT tokens |
+| POST | `/auth/refresh` | Refresh access token |
+| POST | `/auth/logout` | Revoke session |
+| GET | `/users/me` | Current user profile |
+| GET/POST | `/wallets` | List / add operator wallets |
+| GET/POST | `/strategies` | List / create strategies |
+| GET | `/trades` | Trade history |
+| GET | `/trades/summary` | Win rate, P&L summary |
+| GET/POST | `/opportunities` | Detected arb opportunities |
+| GET | `/flash-loans/providers` | Available flash loan providers |
+| POST | `/flash-loans/quote` | Get flash loan fee quote |
+| GET/POST | `/settings` | System configuration |
+| GET/POST | `/risk/rules` | Risk management rules |
+| POST | `/bot/start` | Start MEV bot |
+| POST | `/bot/stop` | Stop MEV bot |
+| GET | `/bot/status` | Bot running state |
+| GET | `/monitoring/overview` | Dashboard overview metrics |
+| GET | `/monitoring/system-events` | System event log |
+| GET | `/health` | Health check |
+| WS | `/ws` | Real-time WebSocket feed |
 
-## Operator Wallet Safety
+## Database Migrations
 
-The configured operator wallet must be system-owned and carry no account data for the appended Jito System Program tip transfer. The bot validates owner/data length and requires enough SOL for Ultra fees plus the configured Jito tip.
+13 migrations in `database/migrations/`. Apply with:
+```
+psql $DATABASE_URL -f database/migrations/001_create_users.sql
+# ... through 013_ip_address_to_text.sql
+```
+Or via Docker: migrations run automatically on `docker-compose up`.
 
 ## DEX Programs Monitored
 
@@ -81,3 +119,11 @@ The configured operator wallet must be system-owned and carry no account data fo
 ## Token Universe
 
 SOL, USDC, USDT, RAY, ORCA, JUP, mSOL, JitoSOL, BONK, WIF, PYTH, RENDER
+
+## User Preferences
+
+- No mocks, no placeholders, no TODOs — all code must be production-ready.
+- Rust backend (Axum, SQLx, PostgreSQL, Redis).
+- Frontend served as static HTML+TailwindCSS from the API server.
+- Live execution uses Jupiter Ultra orders only; legacy `/swap/v2` is removed.
+- Smart contracts compiled separately via `anchor build` (not part of Rust workspace).

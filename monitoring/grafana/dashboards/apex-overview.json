@@ -1,0 +1,35 @@
+{
+  "id": null,
+  "uid": "apex-overview",
+  "title": "Apex MEV Platform Overview",
+  "tags": ["apex", "mev", "trading"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1, "type": "stat", "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "title": "API Health",
+      "targets": [{ "expr": "apex_up{component='api'}", "legendFormat": "API" }],
+      "options": { "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "id": 2, "type": "stat", "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "title": "HTTP Requests Total",
+      "targets": [{ "expr": "rate(apex_requests_total[5m])", "legendFormat": "req/s" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "title": "Request Rate",
+      "targets": [{ "expr": "rate(apex_requests_total[1m])", "legendFormat": "{{method}} {{path}}" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "title": "Response Latency P95",
+      "targets": [{ "expr": "histogram_quantile(0.95, rate(apex_request_duration_seconds_bucket[5m]))", "legendFormat": "p95" }]
+    }
+  ],
+  "annotations": { "list": [] },
+  "links": []
+}

@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { @apply dark; }
+  body { @apply bg-apex-900 text-gray-100 font-mono; }
+}
+
+@layer components {
+  .card   { @apply bg-apex-800 border border-apex-700 rounded-xl p-6; }
+  .btn    { @apply px-4 py-2 rounded-lg font-medium transition-all duration-150 cursor-pointer; }
+  .btn-primary  { @apply btn bg-apex-500 hover:bg-apex-400 text-white; }
+  .btn-danger   { @apply btn bg-red-600 hover:bg-red-500 text-white; }
+  .btn-ghost    { @apply btn border border-apex-600 hover:bg-apex-700 text-gray-300; }
+  .badge        { @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium; }
+  .badge-green  { @apply badge bg-emerald-900 text-emerald-300; }
+  .badge-red    { @apply badge bg-red-900 text-red-300; }
+  .badge-yellow { @apply badge bg-yellow-900 text-yellow-300; }
+  .badge-blue   { @apply badge bg-blue-900 text-blue-300; }
+  .input        { @apply w-full bg-apex-700 border border-apex-600 rounded-lg px-3 py-2 text-gray-100 focus:outline-none focus:border-apex-500; }
+  .stat-value   { @apply text-3xl font-bold text-white; }
+  .stat-label   { @apply text-sm text-gray-400 mt-1; }
+  .table-row    { @apply border-b border-apex-700 hover:bg-apex-700 transition-colors; }
+}

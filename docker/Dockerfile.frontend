@@ -1,0 +1,14 @@
+FROM node:20-alpine AS tailwind-builder
+
+WORKDIR /build
+COPY frontend/package.json ./
+RUN npm install
+
+COPY frontend/ ./
+RUN npx tailwindcss -i ./src/input.css -o ./dist/tailwind.css --minify
+
+FROM nginx:alpine
+COPY --from=tailwind-builder /build/dist/ /usr/share/nginx/html/
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 3000

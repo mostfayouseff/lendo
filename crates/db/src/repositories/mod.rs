@@ -1,0 +1,23 @@
+pub mod audit;
+pub mod opportunity;
+pub mod risk;
+pub mod session;
+pub mod setting;
+pub mod strategy;
+pub mod system_event;
+pub mod token;
+pub mod trade;
+pub mod wallet;
+pub mod user;
+
+pub use audit::AuditRepository;
+pub use opportunity::OpportunityRepository;
+pub use risk::RiskRepository;
+pub use session::SessionRepository;
+pub use setting::SettingRepository;
+pub use strategy::StrategyRepository;
+pub use system_event::SystemEventRepository;
+pub use token::TokenRepository;
+pub use trade::TradeRepository;
+pub use wallet::WalletRepository;
+pub use user::UserRepository;

@@ -1,0 +1,4 @@
+- [Platform build lessons](platform-build.md) — SQLx compile-time macros need live DB + ran migrations; INET→TEXT; enum Copy; error.rs match self not &self
+- [SQLx manual migration fix](sqlx-manual-migration-fix.md) — when migrations run manually via psql, _sqlx_migrations must be populated with SHA384 checksums or SQLx re-runs all and fails on duplicate types.
+- [Admin seed activation](admin-seed-activation.md) — DB default user status is 'pending'; seed_admin must call update() with UserStatus::Active or login returns ACCOUNT_PENDING.
+- [tower-http fs feature](tower-http-fs.md) — ServeDir/ServeFile require the 'fs' cargo feature; not included in the default tower-http feature set.

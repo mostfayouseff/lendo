@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Apex MEV — Flash Loan Arbitrage Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'monospace'] },
+          colors: {
+            apex: {
+              bg:      '#0a0f1a',
+              surface: '#111827',
+              border:  '#1f2937',
+              accent:  '#3b82f6',
+              green:   '#10b981',
+              red:     '#ef4444',
+              yellow:  '#f59e0b',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: 'JetBrains Mono', monospace; }
+    body { background: #0a0f1a; color: #e5e7eb; }
+    .sidebar-link { @apply flex items-center gap-3 px-4 py-2.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-all text-sm; }
+    .sidebar-link.active { @apply text-blue-400 bg-blue-900/30 border border-blue-800/50; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -14,12 +14,18 @@ APEX_JITO_TIP_ACCOUNT = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"
 APEX_CB_THRESHOLD_LAMPORTS = "5000000000"
 APEX_CB_CONSECUTIVE_LOSSES = "10"
 APEX_SIMULATION_ONLY = "false"
-RUST_LOG = "info"
 APEX_ENV = "production"
 APEX_FLASH_LOAN_ENABLED = "true"
 APEX_AUTO_OPTIMIZE = "true"
 APEX_SLIPPAGE_BPS = "50"
 APEX_MAX_DAILY_LOSS_LAMPORTS = "500000000"
+
+[userenv.development]
+JWT_SECRET = "3ba9e9f9c2f3f2f4f19b69ad84bdb04ca330024dffa64fcbb5439948107edb3bccbc82ac9d0f4dfef8c9112d28ec308734e4d9e9cf28f4cc0b83966d6949c5ba"
+ADMIN_EMAIL = "admin@apex.local"
+ADMIN_PASSWORD = "Apex2024!Dev"
+RUST_LOG = "info"
+API_PORT = "5000"
 
 [workflows]
 runButton = "Project"
@@ -33,6 +39,10 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start API server"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -44,9 +54,25 @@ args = "cargo run --bin apex-mev 2>&1"
 [workflows.workflow.metadata]
 outputType = "console"
 
+[[workflows.workflow]]
+name = "Start API server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cargo run --bin apex-api 2>&1"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [nix]
 packages = ["nano"]
 channel = "stable-25_05"
 
 [deployment]
 deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 5000
+externalPort = 80

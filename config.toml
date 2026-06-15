@@ -1,0 +1,32 @@
+# Apex MEV Platform — static configuration
+# Dynamic settings (bot params, risk rules) live in the database.
+# This file is for server-level config that doesn't change at runtime.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+request_timeout_secs  = 30
+max_body_size_bytes   = 1_048_576
+
+[database]
+max_connections = 20
+min_connections = 2
+acquire_timeout_secs = 30
+
+[cache]
+pool_size = 10
+session_ttl_secs = 900
+rate_limit_max   = 100
+rate_limit_window_secs = 60
+
+[jwt]
+access_token_expiry_minutes = 15
+refresh_token_expiry_days   = 7
+
+[solana]
+commitment = "confirmed"
+simulation_only = true
+
+[monitoring]
+prometheus_enabled = true
+log_format = "json"
